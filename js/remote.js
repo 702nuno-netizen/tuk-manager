@@ -3,10 +3,18 @@
 import { cellFromParts, partsFromCell, round2, rowKey } from './format.js';
 import { blankYear, ensureRecurring } from './model.js';
 import { buildBook, colLetter, contextFromModel, keyIndex } from './sheet.js';
+import {
+  STEP_GAP_MS, backoffMs, explainError, formatIdMap, orderSheets, parseIdMap, progressText,
+  reconcileIndex, runStages, stepLabel
+} from './stages.js';
 
 const DRIVE = 'https://www.googleapis.com/drive/v3';
 const SHEETS = 'https://sheets.googleapis.com/v4/spreadsheets';
 export const APP_MARK = 'tuk-manager';
+
+function wait(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
 
 async function gfetch(token, url, opt = {}, attempt = 0) {
   let res;
@@ -16,20 +24,26 @@ async function gfetch(token, url, opt = {}, attempt = 0) {
       headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json', ...(opt.headers || {}) }
     });
   } catch (e) {
+    if (attempt < 4) {
+      await wait(backoffMs(attempt));
+      return gfetch(token, url, opt, attempt + 1);
+    }
     const err = new Error('sem rede');
     err.offline = true;
+    err.reason = explainError(err);
     throw err;
   }
-  if ((res.status === 429 || res.status === 503) && attempt < 6) {
+  if ((res.status === 429 || res.status >= 500) && attempt < 8) {
     const retryAfter = Number(res.headers.get('retry-after'));
-    const wait = Math.min(8000, (retryAfter > 0 ? retryAfter * 1000 : 400 * 2 ** attempt));
-    await new Promise(r => setTimeout(r, wait));
+    await wait(backoffMs(attempt, retryAfter));
     return gfetch(token, url, opt, attempt + 1);
   }
   if (!res.ok) {
     const err = new Error('Google ' + res.status);
     err.status = res.status;
     err.body = (await res.text()).slice(0, 400);
+    err.reason = explainError(err);
+    console.warn('[folha]', res.status, String(url).slice(0, 120), err.body);
     throw err;
   }
   if (res.status === 204) return null;
@@ -261,12 +275,26 @@ function sheetUrl(id) {
   return `https://docs.google.com/spreadsheets/d/${id}/edit`;
 }
 
-function assignGids(book, existingByTitle) {
+function assignGids(book, existingByTitle, savedIds) {
+  const used = new Set();
   let maxId = 0;
-  for (const id of existingByTitle.values()) maxId = Math.max(maxId, Number(id) || 0);
+  for (const id of existingByTitle.values()) {
+    const n = Number(id) || 0;
+    used.add(n);
+    maxId = Math.max(maxId, n);
+  }
+  for (const id of Object.values(savedIds || {})) {
+    const n = Number(id) || 0;
+    if (n) { used.add(n); maxId = Math.max(maxId, n); }
+  }
   for (const ws of book.sheets) {
     if (existingByTitle.has(ws.title)) ws.sheetId = existingByTitle.get(ws.title);
-    else { maxId += 1; ws.sheetId = maxId; }
+    else if (ws.ref && savedIds && savedIds[ws.ref] && !takenByOther(existingByTitle, ws.title, savedIds[ws.ref])) ws.sheetId = Number(savedIds[ws.ref]);
+    else {
+      do { maxId += 1; } while (used.has(maxId));
+      ws.sheetId = maxId;
+      used.add(maxId);
+    }
   }
   const ids = {};
   for (const ws of book.sheets) if (ws.ref) ids[ws.ref] = ws.sheetId;
@@ -274,10 +302,15 @@ function assignGids(book, existingByTitle) {
   return book;
 }
 
-async function stampFile(token, id, year, ready) {
+function takenByOther(existingByTitle, title, id) {
+  for (const [name, sid] of existingByTitle) if (name !== title && Number(sid) === Number(id)) return true;
+  return false;
+}
+
+async function stampFile(token, id, props) {
   await gfetch(token, `${DRIVE}/files/${id}`, {
     method: 'PATCH',
-    body: JSON.stringify({ appProperties: { tmApp: APP_MARK, role: 'main', year: String(year), ready: ready ? '1' : '0' } })
+    body: JSON.stringify({ appProperties: props })
   });
 }
 
@@ -303,105 +336,204 @@ async function hasSchema(token, fileId) {
   }
 }
 
-async function writeBookValues(token, fileId, book) {
-  const sheets = book.sheets.slice().sort((a, b) => (a.title === '⚙ Config') - (b.title === '⚙ Config'));
-  const data = sheets.map(ws => ({ range: `${qTitle(ws.title)}!A1`, majorDimension: 'ROWS', values: gridOf(ws) }));
-  for (let i = 0; i < data.length; i += 3) {
-    await gfetch(token, `${SHEETS}/${fileId}/values:batchUpdate`, {
-      method: 'POST',
-      body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: data.slice(i, i + 3) })
-    });
+async function readProgress(token, fileId) {
+  try {
+    const rows = await readRange(token, fileId, `'⚙ Config'!A28:B29`, 'UNFORMATTED_VALUE');
+    const ids = parseIdMap((rows[0] || [])[1]);
+    const index = Number((rows[1] || [])[1]) || 0;
+    return { ids, index };
+  } catch (e) {
+    return { ids: {}, index: 0 };
   }
 }
 
-async function clearDecorations(token, fileId) {
-  const meta = await gfetch(token, `${SHEETS}/${fileId}?fields=sheets(properties(sheetId),protectedRanges(protectedRangeId),conditionalFormats)`);
-  const req = [];
-  for (const s of meta.sheets || []) {
+async function sendRequests(token, id, requests, chunk = 10) {
+  for (let i = 0; i < requests.length; i += chunk) {
+    const piece = requests.slice(i, i + chunk);
+    if (!piece.length) continue;
+    await gfetch(token, `${SHEETS}/${id}:batchUpdate`, { method: 'POST', body: JSON.stringify({ requests: piece }) });
+  }
+}
+
+function valueBands(ws, size = 60) {
+  const rows = gridOf(ws);
+  const bands = [];
+  const width = rows[0] ? rows[0].length : 1;
+  for (let i = 0; i < rows.length; i += size) {
+    const slice = rows.slice(i, i + size);
+    const end = i + slice.length;
+    bands.push({ range: `${qTitle(ws.title)}!A${i + 1}:${colLetter(width)}${end}`, values: slice });
+  }
+  return bands;
+}
+
+async function clearOneSheet(token, fileId, sheetId) {
+  try {
+    const meta = await gfetch(token, `${SHEETS}/${fileId}?fields=sheets(properties(sheetId),protectedRanges(protectedRangeId),conditionalFormats)`);
+    const s = (meta.sheets || []).find(x => x.properties && x.properties.sheetId === sheetId);
+    if (!s) return;
+    const req = [];
     for (const pr of s.protectedRanges || []) {
       if (pr.protectedRangeId != null) req.push({ deleteProtectedRange: { protectedRangeId: pr.protectedRangeId } });
     }
     const rules = (s.conditionalFormats || []).length;
-    for (let i = rules - 1; i >= 0; i--) req.push({ deleteConditionalFormatRule: { sheetId: s.properties.sheetId, index: i } });
+    for (let i = rules - 1; i >= 0; i--) req.push({ deleteConditionalFormatRule: { sheetId, index: i } });
+    if (req.length) await sendRequests(token, fileId, req, 20);
+  } catch (e) {
+    console.warn('[folha] limpar separador', sheetId, e.status || '', e.body || e.message || '');
   }
-  if (req.length) await batch(token, fileId, req);
 }
 
-async function batchLoose(token, id, requests) {
-  const run = async (list) => {
-    if (!list.length) return;
-    try {
-      await gfetch(token, `${SHEETS}/${id}:batchUpdate`, { method: 'POST', body: JSON.stringify({ requests: list }) });
-    } catch (e) {
-      if (e.status === 400 && list.length > 1) {
-        const mid = Math.ceil(list.length / 2);
-        await run(list.slice(0, mid));
-        await run(list.slice(mid));
-        return;
-      }
-      if (e.status === 400) return;
-      throw e;
-    }
-  };
-  for (let i = 0; i < requests.length; i += 40) await run(requests.slice(i, i + 40));
+async function writeOneSheet(token, fileId, ws, existing) {
+  if (!existing.has(ws.title)) {
+    await sendRequests(token, fileId, [{
+      addSheet: { properties: { sheetId: ws.sheetId, title: ws.title, hidden: !!ws.hidden, tabColor: hexColor(ws.color) } }
+    }], 1);
+    existing.set(ws.title, ws.sheetId);
+  } else {
+    ws.sheetId = existing.get(ws.title);
+    await sendRequests(token, fileId, [{
+      updateSheetProperties: { properties: { sheetId: ws.sheetId, hidden: !!ws.hidden, tabColor: hexColor(ws.color) }, fields: 'hidden,tabColor' }
+    }], 1);
+    await clearOneSheet(token, fileId, ws.sheetId);
+  }
+  if (ws.role === 'config') {
+    await gfetch(token, `${SHEETS}/${fileId}/values:batchUpdate`, {
+      method: 'POST',
+      body: JSON.stringify({
+        valueInputOption: 'USER_ENTERED',
+        data: [{ range: `'⚙ Config'!A28:B29`, values: [['sheet_ids', ''], ['setup_index', '0']] }]
+      })
+    });
+  }
+  const bands = valueBands(ws, 60);
+  for (const band of bands) {
+    await gfetch(token, `${SHEETS}/${fileId}/values:batchUpdate`, {
+      method: 'POST',
+      body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: [band] })
+    });
+  }
+  await sendRequests(token, fileId, formatRequests(ws), 10);
 }
 
-async function ensureBook(token, fileId, model) {
-  const title = `${model.businessName} · ${model.year}`;
+async function noteProgress(token, fileId, index, idMap) {
+  try {
+    await gfetch(token, `${SHEETS}/${fileId}/values:batchUpdate`, {
+      method: 'POST',
+      body: JSON.stringify({
+        valueInputOption: 'USER_ENTERED',
+        data: [{ range: `'⚙ Config'!A28:B29`, values: [['sheet_ids', idMap || ''], ['setup_index', String(index)]] }]
+      })
+    });
+  } catch (e) { /* a configuração pode ainda não existir */ }
+}
+
+async function stageBook(token, fileId, model, hooks = {}) {
+  const sleep = hooks.sleep || wait;
+  const gap = hooks.gapMs == null ? STEP_GAP_MS : hooks.gapMs;
+  const kind = hooks.kind || 'build';
+  const props = hooks.props || {};
   const meta = await gfetch(token, `${SHEETS}/${fileId}?fields=properties(locale,title),sheets.properties(sheetId,title)`);
+  if (!meta.properties || meta.properties.locale !== 'pt_PT') {
+    await sendRequests(token, fileId, [{ updateSpreadsheetProperties: { properties: { locale: 'pt_PT', title: meta.properties && meta.properties.title }, fields: 'locale,title' } }], 1);
+  }
   const existing = new Map();
   for (const s of meta.sheets || []) existing.set(s.properties.title, s.properties.sheetId);
-  const book = assignGids(buildBook(contextFromModel(model)), existing);
-  const requests = [];
-  if (!meta.properties || meta.properties.locale !== 'pt_PT' || meta.properties.title !== title) {
-    requests.push({ updateSpreadsheetProperties: { properties: { title, locale: 'pt_PT' }, fields: 'title,locale' } });
-  }
-  for (const ws of book.sheets) {
-    if (existing.has(ws.title)) {
-      requests.push({ updateSheetProperties: { properties: { sheetId: ws.sheetId, hidden: !!ws.hidden, tabColor: hexColor(ws.color) }, fields: 'hidden,tabColor' } });
-    } else {
-      requests.push({ addSheet: { properties: { sheetId: ws.sheetId, title: ws.title, hidden: !!ws.hidden, tabColor: hexColor(ws.color) } } });
+  const saved = await readProgress(token, fileId);
+  const book = assignGids(buildBook(contextFromModel(model)), existing, saved.ids);
+  if (hooks.fill) hooks.fill(book);
+  const steps = orderSheets(book.sheets);
+  const key = kind === 'paint' ? 'paintIndex' : 'setupIndex';
+  const claimed = Math.max(Number(props[key]) || 0, kind === 'build' ? saved.index : 0, Number(hooks.localIndex) || 0);
+  const start = kind === 'paint' && claimed >= steps.length ? 0 : reconcileIndex(steps, existing, claimed);
+  const idMap = formatIdMap(book.sheets);
+  const role = hooks.role || 'main';
+  const year = model.year;
+  try {
+    const finished = await runStages({
+      steps,
+      doneCount: start,
+      gapMs: gap,
+      sleep,
+      onStep: async (ws, index, total) => {
+        if (hooks.onProgress) await hooks.onProgress({ index, total, label: stepLabel(ws), title: ws.title });
+      },
+      work: async (ws, index) => {
+        try {
+          await writeOneSheet(token, fileId, ws, existing);
+          existing.set(ws.title, ws.sheetId);
+          const done = index + 1;
+          await noteProgress(token, fileId, done, idMap);
+          const extra = kind === 'paint'
+            ? { ready: props.ready || '1', paintIndex: String(done), setupIndex: props.setupIndex || '' }
+            : { ready: '0', setupIndex: String(done) };
+          await stampFile(token, fileId, baseProps(role, year, extra));
+          if (hooks.onDone) await hooks.onDone(done, fileId);
+        } catch (e) {
+          e.stepLabel = stepLabel(ws);
+          e.stepTitle = ws.title;
+          throw e;
+        }
+      }
+    });
+    for (const [name, id] of [...existing]) {
+      if (DEFAULT_TITLES.has(name)) {
+        try { await sendRequests(token, fileId, [{ deleteSheet: { sheetId: id } }], 1); } catch (e) { /* fica a folha de origem */ }
+      }
     }
+    return { steps: steps.length, index: finished };
+  } catch (e) {
+    throw e;
   }
-  if (requests.length) await batch(token, fileId, requests);
-  const defaults = [];
-  for (const [name, id] of existing) {
-    if (DEFAULT_TITLES.has(name)) defaults.push({ deleteSheet: { sheetId: id } });
-  }
-  if (defaults.length) {
-    try { await batch(token, fileId, defaults); } catch (e) { /* a folha de origem pode ser a única */ }
-  }
-  const schema = await hasSchema(token, fileId);
-  if (!schema) await writeBookValues(token, fileId, book);
-  await clearDecorations(token, fileId);
-  let formats = [];
-  for (const ws of book.sheets) formats = formats.concat(formatRequests(ws));
-  await batchLoose(token, fileId, formats);
-  return { id: fileId, name: title, url: sheetUrl(fileId) };
 }
 
-export async function createBook(token, model, preferredId) {
+function baseProps(role, year, extra) {
+  return { tmApp: APP_MARK, role, year: String(year), ...extra };
+}
+
+export async function createBook(token, model, preferredId, hooks = {}) {
   const year = model.year;
   const title = `${model.businessName} · ${year}`;
+  const role = hooks.role || 'main';
   const files = await listFiles(token);
-  let chosen = chooseFile(files, { role: 'main', year, preferredId, title });
+  let chosen = chooseFile(files, { role, year, preferredId, title: role === 'main' ? title : undefined });
   if (!chosen) {
-    await driveCreate(token, title, 'main', year);
+    const created = await driveCreate(token, role === 'backup' ? `${title} (cópia)` : title, role, year);
+    chosen = { id: created.id, name: role === 'backup' ? `${title} (cópia)` : title, appProperties: created.appProperties || {} };
     const again = await listFiles(token);
-    chosen = chooseFile(again, { role: 'main', year, preferredId, title });
+    const winner = chooseFile(again, { role, year, preferredId, title: role === 'main' ? title : undefined });
+    if (winner) chosen = winner;
   }
   if (!chosen) throw new Error('sem folha');
+  if (hooks.onFile) await hooks.onFile({ id: chosen.id, name: chosen.name || title, year, url: sheetUrl(chosen.id) });
+  const props = chosen.appProperties || {};
   try {
-    if ((chosen.appProperties || {}).ready === '1' && (chosen.appProperties || {}).role === 'main') {
+    if (role === 'main' && props.ready === '1') return { id: chosen.id, name: chosen.name || title, url: sheetUrl(chosen.id) };
+    if (role === 'main' && props.ready !== '0' && await hasSchema(token, chosen.id)) {
+      await stampFile(token, chosen.id, baseProps(role, year, { ready: '1', setupIndex: props.setupIndex || '' }));
       return { id: chosen.id, name: chosen.name || title, url: sheetUrl(chosen.id) };
     }
-    await stampFile(token, chosen.id, year, false);
-    const done = await ensureBook(token, chosen.id, model);
-    await stampFile(token, chosen.id, year, true);
-    return done;
+    await stampFile(token, chosen.id, baseProps(role, year, { ready: '0', setupIndex: String(props.setupIndex || hooks.localIndex || 0) }));
+    const staged = await stageBook(token, chosen.id, model, {
+      ...hooks,
+      kind: 'build',
+      props,
+      localIndex: hooks.localIndex,
+      onProgress: async (info) => {
+        const text = hooks.labelPrefix
+          ? `${hooks.labelPrefix}, separador ${info.index + 1} de ${info.total}: ${info.label}`
+          : progressText(info.index, info.total, info.label);
+        if (hooks.onProgress) await hooks.onProgress({ ...info, text });
+      }
+    });
+    await stampFile(token, chosen.id, baseProps(role, year, { ready: '1', setupIndex: String(staged.index) }));
+    if (hooks.onDone) await hooks.onDone(staged.index, chosen.id);
+    return { id: chosen.id, name: chosen.name || title, url: sheetUrl(chosen.id) };
   } catch (e) {
     e.fileId = chosen.id;
     e.fileName = chosen.name || title;
+    e.reason = explainError(e);
+    console.warn('[folha] falhou', e.stepLabel || '', e.reason, e.body || '');
     throw e;
   }
 }
@@ -656,45 +788,22 @@ function indexFromCells(ws) {
   return { cols, rows };
 }
 
-export async function repaintBook(token, fileId, model) {
-  const meta = await gfetch(token, `${SHEETS}/${fileId}?fields=sheets.properties(sheetId,title),sheets.protectedRanges.protectedRangeId`);
+export async function repaintBook(token, fileId, model, hooks = {}) {
+  const meta = await gfetch(token, `${SHEETS}/${fileId}?fields=sheets.properties(sheetId,title)`);
   const byTitle = {};
-  const deletes = [];
-  for (const s of meta.sheets || []) {
-    byTitle[s.properties.title] = s.properties.sheetId;
-    for (const pr of s.protectedRanges || []) deletes.push({ deleteProtectedRange: { protectedRangeId: pr.protectedRangeId } });
-  }
+  for (const s of meta.sheets || []) byTitle[s.properties.title] = s.properties.sheetId;
   const book = buildBook(contextFromModel(model));
-  const idByRef = { painel: byTitle['📊 Painel'] || 0 };
-  for (const d of model.drivers || []) if (d.sheetId) idByRef[d.id] = d.sheetId;
-  for (const t of model.tuks || []) if (t.sheetId) idByRef[t.id] = t.sheetId;
   const missing = [];
-  for (const ws of book.sheets) {
-    if (!byTitle[ws.title]) { if (!ws.hidden) missing.push(ws.title); continue; }
-    ws.sheetId = byTitle[ws.title];
-    for (const c of ws.cells) {
-      if (typeof c.v === 'string' && c.v.includes('{{gid:')) {
-        c.v = c.v.replace(/\{\{gid:([^}]+)\}\}/g, (_, k) => String(k === 'self' ? ws.sheetId : (idByRef[k] || 0)));
-      }
-    }
-    fillInputs(ws, model);
-  }
+  for (const ws of book.sheets) if (!byTitle[ws.title] && !ws.hidden) missing.push(ws.title);
   if (missing.length) return { missing };
-  if (deletes.length) await batch(token, fileId, deletes);
-  const data = book.sheets.filter(ws => byTitle[ws.title]).map(ws => ({
-    range: `'${ws.title.replace(/'/g, "''")}'!A1`,
-    majorDimension: 'ROWS',
-    values: gridOf(ws)
-  }));
-  for (let i = 0; i < data.length; i += 4) {
-    await gfetch(token, `${SHEETS}/${fileId}/values:batchUpdate`, {
-      method: 'POST',
-      body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: data.slice(i, i + 4) })
-    });
-  }
-  let formats = [];
-  for (const ws of book.sheets) if (byTitle[ws.title]) formats = formats.concat(formatRequests(ws));
-  await batch(token, fileId, formats);
+  const info = await gfetch(token, `${DRIVE}/files/${fileId}?fields=appProperties`);
+  await stageBook(token, fileId, model, {
+    ...hooks,
+    kind: 'paint',
+    role: 'main',
+    props: (info && info.appProperties) || {},
+    fill: (built) => { for (const ws of built.sheets) fillInputs(ws, model); }
+  });
   return { missing: [] };
 }
 
@@ -732,7 +841,9 @@ export async function pushRoster(token, fileId, model) {
   for (const d of model.drivers) if (d.sheetId) idByRef[d.id] = d.sheetId;
   for (const t of model.tuks) if (t.sheetId) idByRef[t.id] = t.sheetId;
   let added = false;
+  let staged = 0;
   const book = buildBook(contextFromModel(model));
+  const existing = new Map(Object.entries(byTitle));
   for (const ws of book.sheets) {
     if (ws.role !== 'motorista' && ws.role !== 'tuk') continue;
     if (byTitle[ws.title]) {
@@ -740,20 +851,17 @@ export async function pushRoster(token, fileId, model) {
       if (ent) { ent.sheetId = byTitle[ws.title]; ent.sheetTitle = ws.title; idByRef[ws.ref] = byTitle[ws.title]; }
       continue;
     }
+    if (staged) await wait(STEP_GAP_MS);
     maxId += 1;
     ws.sheetId = maxId;
     bindGids(ws, ws.sheetId, idByRef);
     idByRef[ws.ref] = ws.sheetId;
+    await writeOneSheet(token, fileId, ws, existing);
     byTitle[ws.title] = ws.sheetId;
-    await batch(token, fileId, [{ addSheet: { properties: { sheetId: ws.sheetId, title: ws.title, hidden: false, tabColor: hexColor(ws.color) } } }]);
-    await gfetch(token, `${SHEETS}/${fileId}/values:batchUpdate`, {
-      method: 'POST',
-      body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: [{ range: `${qTitle(ws.title)}!A1`, majorDimension: 'ROWS', values: gridOf(ws) }] })
-    });
-    await batch(token, fileId, formatRequests(ws));
     const ent = (ws.role === 'motorista' ? model.drivers : model.tuks).find(x => x.id === ws.ref);
     if (ent) { ent.sheetId = ws.sheetId; ent.sheetTitle = ws.title; }
     added = true;
+    staged += 1;
   }
   const mot = await readRange(token, fileId, `'⚙ Motoristas'!A2:A60`, 'UNFORMATTED_VALUE');
   const tukCol = await readRange(token, fileId, `'⚙ Tuks'!A2:A60`, 'UNFORMATTED_VALUE');
@@ -880,18 +988,22 @@ export async function readKeys(token, spreadsheetId, sheetTitle) {
   return { cols, rows };
 }
 
-export async function backupFile(token, file) {
-  const files = await listFiles(token);
-  const existing = chooseFile(files, { role: 'backup', year: file.year });
-  if (existing) return existing.id;
-  const copy = await gfetch(token, `${DRIVE}/files/${file.id}/copy`, {
-    method: 'POST',
-    body: JSON.stringify({
-      name: `${file.name} (cópia)`,
-      appProperties: { tmApp: APP_MARK, role: 'backup', year: String(file.year), ready: '1' }
-    })
-  });
-  return copy.id;
+export async function backupFile(token, file, model, hooks = {}) {
+  if (!model) {
+    const files = await listFiles(token);
+    const existing = chooseFile(files, { role: 'backup', year: file.year });
+    if (existing) return existing.id;
+    const copy = await gfetch(token, `${DRIVE}/files/${file.id}/copy`, {
+      method: 'POST',
+      body: JSON.stringify({
+        name: `${file.name} (cópia)`,
+        appProperties: baseProps('backup', file.year, { ready: '1', setupIndex: '' })
+      })
+    });
+    return copy.id;
+  }
+  const made = await createBook(token, model, '', { ...hooks, role: 'backup', labelPrefix: 'A criar a cópia' });
+  return made.id;
 }
 
 export async function setColumnHidden(token, spreadsheetId, sheetId, colIndex, hidden) {
@@ -905,16 +1017,12 @@ export async function setColumnHidden(token, spreadsheetId, sheetId, colIndex, h
 }
 
 export async function addSheetFromBook(token, spreadsheetId, ws, knownIds) {
-  const maxId = Math.max(0, ...Object.values(knownIds));
+  const maxId = Math.max(0, ...Object.values(knownIds).map(n => Number(n) || 0));
   ws.sheetId = maxId + 1;
-  await batch(token, spreadsheetId, [{
-    addSheet: { properties: { sheetId: ws.sheetId, title: ws.title, hidden: !!ws.hidden, tabColor: hexColor(ws.color) } }
-  }]);
-  await gfetch(token, `${SHEETS}/${spreadsheetId}/values:batchUpdate`, {
-    method: 'POST',
-    body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: [{ range: `'${ws.title.replace(/'/g, "''")}'!A1`, values: gridOf(ws) }] })
-  });
-  await batch(token, spreadsheetId, formatRequests(ws));
+  const meta = await gfetch(token, `${SHEETS}/${spreadsheetId}?fields=sheets.properties(sheetId,title)`);
+  const existing = new Map();
+  for (const s of meta.sheets || []) existing.set(s.properties.title, s.properties.sheetId);
+  await writeOneSheet(token, spreadsheetId, ws, existing);
   return ws.sheetId;
 }
 

@@ -107,12 +107,17 @@ function barGoal(mv, model) {
   return { per, people, company, pct: company > 0 ? mv.fat / company : 0 };
 }
 function loading(s) {
-  if (!s.busy && !s.syncing) return '';
-  if (s.busy) {
-    const text = s.busyLabel || 'A carregar…';
-    return `<div class="loading" role="status" aria-live="polite"><div class="loading-card"><div class="spin"></div><p>${escapeHtml(text)}</p></div></div>`;
-  }
-  return '';
+  if (!s.busy) return '';
+  const text = s.busyLabel || 'A carregar…';
+  const total = Number(s.setupTotal) || 0;
+  const index = Number(s.setupIndex) || 0;
+  const pct = total ? Math.max(8, Math.min(100, Math.round((index / total) * 100))) : 0;
+  const bar = total ? `<div class="bar" aria-hidden="true"><i style="width:${pct}%"></i></div>` : '';
+  return `<div class="loading" role="status" aria-live="polite"><div class="loading-card"><div class="spin"></div><p>${escapeHtml(text)}</p>${bar}</div></div>`;
+}
+function demoBar(s) {
+  if (s.mode !== 'demo') return '';
+  return `<div class="demo-bar"><span>Modo demonstração</span><button type="button" data-act="ask-exit-demo">Sair</button></div>`;
 }
 function offline(s) {
   if (s.mode === 'google' && s.syncError) {
@@ -493,6 +498,7 @@ function def(s) {
       <button type="button" class="set-row" data-act="go" data-to="folha"><div class="card-ic">${I.cal}</div><div class="sm"><b>Criar folha de outro ano</b><span>Uma folha vazia para qualquer ano</span></div>${I.chev}</button>
       <button type="button" class="set-row" data-act="go" data-to="folha"><div class="card-ic gold">${I.reset}</div><div class="sm"><b>Repor aspeto da folha</b><span>Repõe o desenho, sem mexer nos valores</span></div>${I.chev}</button>
       <div class="set-row"><div class="card-ic">${I.globe}</div><div class="sm"><b>${s.mode === 'demo' ? 'Modo demonstração' : 'Conta Google'}</b><span>${escapeHtml(s.emailLabel || '')}</span></div>${s.mode === 'demo' ? '<button type="button" class="link-btn" data-act="google">Entrar</button>' : '<button type="button" class="link-btn" data-act="signout">Sair</button>'}</div>
+      ${s.mode === 'demo' ? `<button type="button" class="set-row" data-act="ask-exit-demo"><div class="card-ic">${I.back}</div><div class="sm"><b>Sair da demonstração</b><span>Apaga os dados de exemplo e volta ao início</span></div>${I.chev}</button>` : ''}
       <div class="set-row"><div class="card-ic">${I.globe}</div><div class="sm"><b>Idioma</b><span>Português da Europa</span></div><span class="val">Português</span></div>
     </section>
     <p class="muted" style="text-align:center"><a href="privacy.html">Privacidade</a> · <a href="terms.html">Termos</a></p>
@@ -613,6 +619,7 @@ function overlay(s) {
   else if (sh.type === 'new-driver') inner = newDriver(s);
   else if (sh.type === 'rename') inner = renameSheet(s, sh);
   else if (sh.type === 'year') inner = yearSheet(s, sh);
+  else if (sh.type === 'exit-demo') inner = exitDemoSheet();
   if (!inner) return '';
   return `<div class="sheet-bg show" data-act="close-sheet"></div><div class="sheet show"><div class="grab"></div>${inner}</div>`;
 }
@@ -681,6 +688,10 @@ function yearSheet(s, sh) {
     <div class="field"><label>Ano</label><input id="year-other" inputmode="numeric" value="${escapeHtml(String(suggestion))}"></div>
     <div class="btns" style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px"><button type="button" class="btn btn-ghost" data-act="close-sheet">Cancelar</button><button type="button" class="btn btn-primary" data-act="save-year">Usar este ano</button></div>`;
 }
+function exitDemoSheet() {
+  return `<h3>Sair da demonstração</h3><p>Os dados de exemplo deste telemóvel são apagados. A app volta ao início.</p>
+    <div class="btns" style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px"><button type="button" class="btn btn-ghost" data-act="close-sheet">Cancelar</button><button type="button" class="btn btn-primary" data-act="confirm-exit-demo">Sair</button></div>`;
+}
 function newDriver() {
   return `<h3>Novo motorista</h3><p>A % é a parte dele. Podes marcá-lo como patrão.</p>
     <div class="field"><label>Nome</label><input id="nd-name" placeholder="Nome"></div>
@@ -695,7 +706,7 @@ export function render(s) {
   if (!s.onboarded || s.route.name === 'inicio') return setup(s) + toast(s) + loading(s);
   const name = s.route.name;
   const page = name === 'dia' ? dia(s) : name === 'mes' ? mes(s) : name === 'tuk' ? tuk(s) : name === 'ano' ? ano(s) : name === 'obj' ? obj(s) : name === 'def' ? def(s) : name === 'tipos' ? tipos(s) : name === 'folha' ? folha(s) : name === 'pessoas' ? pessoas(s) : hoje(s);
-  return page + toast(s) + overlay(s) + loading(s);
+  return demoBar(s) + page + toast(s) + overlay(s) + loading(s);
 }
 
 export function suggestions(model) {

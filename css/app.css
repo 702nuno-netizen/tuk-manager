@@ -8,6 +8,9 @@ button.sw{padding:0}
 .loading{position:fixed;inset:0;z-index:80;background:rgba(8,22,46,.45);display:grid;place-items:center;padding:24px}
 .loading-card{width:min(300px,100%);background:#fff;color:#0b2142;border-radius:22px;padding:28px 22px;text-align:center;box-shadow:0 10px 30px rgba(12,33,66,.16)}
 .loading-card p{margin:14px 0 0;font-weight:700}
+.loading-card .bar{margin-top:14px}
+.demo-bar{position:sticky;top:0;z-index:25;display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0;padding:10px 14px;background:#fff6e8;color:#7a5a12;font-weight:700;font-size:13.5px}
+.demo-bar button{background:#0b2142;color:#fff;border-radius:999px;padding:7px 14px;font-weight:700;font-size:13px}
 .spin{width:36px;height:36px;margin:0 auto;border-radius:50%;border:3px solid #e4edf9;border-top-color:#d4a537;animation:spin .8s linear infinite}
 .sync-note .spin{width:16px;height:16px;border-width:2px;margin:0;flex:none}
 .sync-note .link-btn{padding:6px 0;white-space:nowrap}
