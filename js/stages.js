@@ -93,6 +93,30 @@ function overlaps(a, b) {
   return a[0] <= b[2] && b[0] <= a[2] && a[1] <= b[3] && b[1] <= a[3];
 }
 
+export function requiredGrid(ws) {
+  let rows = 1;
+  let cols = 1;
+  const box = (r1, c1, r2, c2) => {
+    rows = Math.max(rows, Number(r1) || 0, Number(r2) || 0);
+    cols = Math.max(cols, Number(c1) || 0, Number(c2) || 0);
+  };
+  const a1 = (ref) => {
+    const m = /^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$/.exec(String(ref || ''));
+    if (!m) return;
+    box(Number(m[2]), colNum(m[1]), Number(m[4] || m[2]), m[3] ? colNum(m[3]) : colNum(m[1]));
+  };
+  for (const c of ws.cells || []) box(c.r, c.c, c.r, c.c);
+  for (const m of ws.merges || []) box(m[0], m[1], m[2], m[3]);
+  for (const r of ws.hideRow || []) rows = Math.max(rows, r);
+  for (const c of ws.hideCol || []) cols = Math.max(cols, colNum(c));
+  for (const p of ws.protect || []) a1(p);
+  for (const rule of ws.cf || []) a1(rule.range);
+  for (const check of ws.checks || []) a1(String(check.range || '').includes(':') ? check.range : check.range + ':' + check.range);
+  for (const k of Object.keys(ws.colW || {})) cols = Math.max(cols, Number(k) || 0);
+  for (const k of Object.keys(ws.rowH || {})) rows = Math.max(rows, Number(k) || 0);
+  return { rowCount: Math.max(1000, rows), columnCount: Math.max(26, cols) };
+}
+
 function rangeOk(range) {
   if (!range) return false;
   const { startRowIndex, endRowIndex, startColumnIndex, endColumnIndex } = range;
@@ -109,6 +133,11 @@ export function auditRequests(ws, requests) {
     for (const ch of m[1]) n = n * 26 + (ch.charCodeAt(0) - 64);
     frozenCols = n - 1;
   }
+  const grid = requiredGrid(ws);
+  const noteGrid = (range, where) => {
+    if (!range) return;
+    if (range.endRowIndex > grid.rowCount || range.endColumnIndex > grid.columnCount) faults.push(where + ' além da grelha');
+  };
   const merges = [];
   requests.forEach((req, i) => {
     if (req.mergeCells) {
@@ -135,18 +164,73 @@ export function auditRequests(ws, requests) {
     if (req.addConditionalFormatRule) {
       const rule = req.addConditionalFormatRule.rule;
       const cond = rule && rule.booleanRule && rule.booleanRule.condition;
-      if (!cond || !cond.values || !cond.values[0] || !cond.values[0].userEnteredValue) faults.push('formato condicional sem fórmula');
+      const entered = cond && cond.values && cond.values[0] && cond.values[0].userEnteredValue;
+      if (!entered) faults.push('formato condicional sem fórmula');
+      else faults.push(...formulaFaults(entered, 'formato condicional'));
       if (!rule.ranges || !rule.ranges.length || !rangeOk(rule.ranges[0])) faults.push('formato condicional sem intervalo');
+      if (rule.ranges && rule.ranges[0] && rangeOk(rule.ranges[0])) noteGrid(rule.ranges[0], 'formato condicional');
     }
-    if (req.setDataValidation && !rangeOk(req.setDataValidation.range)) faults.push('validação sem intervalo');
+    if (req.setDataValidation) {
+      if (!rangeOk(req.setDataValidation.range)) faults.push('validação sem intervalo');
+      const cond = req.setDataValidation.rule && req.setDataValidation.rule.condition;
+      const entered = cond && cond.values && cond.values[0] && cond.values[0].userEnteredValue;
+      if (cond && (cond.type === 'ONE_OF_RANGE' || cond.type === 'CUSTOM_FORMULA')) {
+        if (!entered) faults.push('validação sem intervalo de origem');
+        else faults.push(...formulaFaults(entered, 'validação'));
+      }
+      if (req.setDataValidation.range) noteGrid(req.setDataValidation.range, 'validação');
+    }
+    if (req.repeatCell && req.repeatCell.range) noteGrid(req.repeatCell.range, 'pintura');
+    if (req.addProtectedRange && req.addProtectedRange.protectedRange && req.addProtectedRange.protectedRange.range) noteGrid(req.addProtectedRange.protectedRange.range, 'proteção');
+    if (req.updateDimensionProperties && req.updateDimensionProperties.range) {
+      const r = req.updateDimensionProperties.range;
+      if (r.dimension === 'ROWS' && r.endIndex > grid.rowCount) faults.push('dimensão além da grelha');
+      if (r.dimension === 'COLUMNS' && r.endIndex > grid.columnCount) faults.push('dimensão além da grelha');
+    }
     const sheetId = (req.mergeCells && req.mergeCells.range.sheetId)
       || (req.repeatCell && req.repeatCell.range.sheetId)
       || (req.updateSheetProperties && req.updateSheetProperties.properties.sheetId);
     if (sheetId != null && typeof sheetId !== 'number') faults.push('sheetId inválido');
   });
+  const hiddenRows = new Set(ws.hideRow || []);
+  const hiddenCols = new Set((ws.hideCol || []).map(c => typeof c === 'number' ? c : colNum(c)));
+  if (frozenRows > 0 && [...hiddenRows].filter(r => r <= frozenRows).length >= frozenRows) faults.push('todas as linhas congeladas ficam ocultas');
+  if (frozenCols > 0 && [...hiddenCols].filter(c => c <= frozenCols).length >= frozenCols) faults.push('todas as colunas congeladas ficam ocultas');
   return faults.concat(mergeFaults(merges, {
     frozenRows, frozenCols, hiddenRows: ws.hideRow, hiddenCols: ws.hideCol
   }));
+}
+
+/** Referência 'Separador'! que não está dentro de INDIRECT("..."). */
+export function bareSheetRefs(formula) {
+  let s = String(formula || '');
+  s = s.replace(/INDIRECT\(\s*"(?:[^"]|"")*"\s*\)/gi, '');
+  s = s.replace(/"(?:[^"]|"")*"/g, '');
+  const found = [];
+  const re = /'(?:[^']|'')+'!/g;
+  let m;
+  while ((m = re.exec(s))) found.push(m[0]);
+  return found;
+}
+
+function formulaFaults(formula, where) {
+  const faults = [];
+  const text = String(formula || '');
+  if (text && !text.startsWith('=')) faults.push(where + ' sem =');
+  for (const ref of bareSheetRefs(text)) faults.push(where + ' com referência direta ' + ref);
+  if (/\bTRUE\b|\bFALSE\b/.test(text.replace(/"(?:[^"]|"")*"/g, ''))) faults.push(where + ' com booleano inglês');
+  let q = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '"') q = !q;
+    if (!q && ch === ',') {
+      const prev = text[i - 1];
+      const next = text[i + 1];
+      const decimal = prev >= '0' && prev <= '9' && next >= '0' && next <= '9';
+      if (!decimal) { faults.push(where + ' com vírgula de argumento'); break; }
+    }
+  }
+  return faults;
 }
 
 export function mergeFaults(merges, opt = {}) {

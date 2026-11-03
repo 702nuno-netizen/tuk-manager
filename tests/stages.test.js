@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { buildBook } from '../js/sheet.js';
 import { decideSetup, formatRequests } from '../js/remote.js';
 import {
-  STEP_GAP_MS, auditRequests, explainError, orderSheets, planRun, progressText, reconcileIndex, runStages, stepLabel
+  STEP_GAP_MS, auditRequests, bareSheetRefs, explainError, orderSheets, planRun, progressText, reconcileIndex, runStages, stepLabel
 } from '../js/stages.js';
 
 function book() {
@@ -67,6 +67,30 @@ test('nenhuma união cruza o congelamento, a linha 1 ou a coluna A', () => {
     const faults = auditRequests(ws, formatRequests(ws));
     assert.deepEqual(faults, [], ws.title + ': ' + faults.join(' | '));
   }
+});
+
+test('regras condicionais e validações não apontam para outro separador', () => {
+  for (const ws of book().sheets) {
+    ws.sheetId = 4;
+    for (const req of formatRequests(ws)) {
+      const bits = [];
+      if (req.addConditionalFormatRule) {
+        const v = req.addConditionalFormatRule.rule.booleanRule.condition.values[0].userEnteredValue;
+        bits.push(v);
+      }
+      if (req.setDataValidation) {
+        const cond = req.setDataValidation.rule.condition;
+        if (cond.type === 'ONE_OF_RANGE' || cond.type === 'CUSTOM_FORMULA') bits.push(cond.values[0].userEnteredValue);
+      }
+      for (const formula of bits) {
+        assert.deepEqual(bareSheetRefs(formula), [], ws.title + ' ' + formula);
+      }
+    }
+    const faults = auditRequests(ws, formatRequests(ws)).filter(f => /referência direta|vírgula de argumento|booleano|além da grelha/.test(f));
+    assert.deepEqual(faults, [], ws.title + ': ' + faults.join(' | '));
+  }
+  assert.deepEqual(bareSheetRefs('=INDIRECT("\'⚙ Config\'!B2")="NÃO"'), []);
+  assert.deepEqual(bareSheetRefs('=IFERROR(INDEX(\'⚙ Config\'!$B$2:$B$50;MATCH("x";\'⚙ Config\'!$A$2:$A$50;0));"SIM")'), ["'⚙ Config'!", "'⚙ Config'!"]);
 });
 
 test('não se cria uma segunda folha e o erro explica a causa', () => {

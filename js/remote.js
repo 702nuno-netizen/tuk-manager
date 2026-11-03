@@ -4,7 +4,7 @@ import { cellFromParts, partsFromCell, round2, rowKey } from './format.js';
 import { blankYear, ensureRecurring } from './model.js';
 import { buildBook, colLetter, contextFromModel, keyIndex } from './sheet.js';
 import {
-  STEP_GAP_MS, backoffMs, explainError, formatIdMap, legalMerges, orderSheets, parseIdMap, progressText,
+  STEP_GAP_MS, backoffMs, explainError, formatIdMap, legalMerges, orderSheets, parseIdMap, progressText, requiredGrid,
   reconcileIndex, runStages, stepLabel
 } from './stages.js';
 
@@ -393,15 +393,16 @@ async function clearOneSheet(token, fileId, sheetId) {
 }
 
 async function writeOneSheet(token, fileId, ws, existing) {
+  const grid = requiredGrid(ws);
   if (!existing.has(ws.title)) {
     await sendRequests(token, fileId, [{
-      addSheet: { properties: { sheetId: ws.sheetId, title: ws.title, hidden: !!ws.hidden, tabColor: hexColor(ws.color) } }
+      addSheet: { properties: { sheetId: ws.sheetId, title: ws.title, hidden: !!ws.hidden, tabColor: hexColor(ws.color), gridProperties: grid } }
     }], 1);
     existing.set(ws.title, ws.sheetId);
   } else {
     ws.sheetId = existing.get(ws.title);
     await sendRequests(token, fileId, [{
-      updateSheetProperties: { properties: { sheetId: ws.sheetId, hidden: !!ws.hidden, tabColor: hexColor(ws.color) }, fields: 'hidden,tabColor' }
+      updateSheetProperties: { properties: { sheetId: ws.sheetId, hidden: !!ws.hidden, tabColor: hexColor(ws.color), gridProperties: grid }, fields: 'hidden,tabColor,gridProperties.rowCount,gridProperties.columnCount' }
     }], 1);
     await clearOneSheet(token, fileId, ws.sheetId);
   }

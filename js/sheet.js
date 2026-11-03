@@ -227,17 +227,21 @@ function driverSheet(plan, d, template) {
     const last = m === 12;
     ws.protectRange(`D${rt}:L${last ? 1000 : r0 + 37}`);
   }
-  ws.hideCol.push('A', 'M');
+  ws.hideCol.push('A', 'M', 'N');
   const owner = !!(d && d.owner);
   if (owner) ['G', 'H', 'I', 'J', 'K'].forEach(c => ws.hideCol.push(c));
   else ws.hideCol.push('F');
   if (owner && !plan.tips) ws.hideCol.push('F');
+  ws.put(2, 14, ptFormula(`=IFERROR(INDEX(${QCFG}!$B$2:$B$50,MATCH("gratificacoes_ativas",${QCFG}!$A$2:$A$50,0)),"SIM")`), { color: GREY, size: 8 });
+  for (let i = 0; i < 50; i++) {
+    const src = i + 2;
+    ws.put(3 + i, 14, ptFormula(`=IF(${QT}!A${src}="","",${QT}!B${src})`), { color: GREY, size: 8 });
+  }
   ['A1:C1000', 'G1:I1000', 'K1:K1000', 'M1:Z1000', 'D1:L8'].forEach(r => ws.protectRange(r));
-  ws.checks.push({ range: 'D9:D500', kind: 'list-range', formula: `=${QT}!$B$2:$B$51` });
+  ws.checks.push({ range: 'D9:D500', kind: 'list-range', formula: '=$N$3:$N$52' });
   ws.checks.push({ range: 'E9:E500', kind: 'number>=0' });
   ws.checks.push({ range: 'F9:F500', kind: 'number>=0' });
   ws.checks.push({ range: 'J9:J500', kind: 'number>=0' });
-  const gratOff = ptFormula(`=${gratOn}="NÃO"`);
   ws.cf.push(
     { range: 'B9:C450', formula: '=AND(ISNUMBER($B9);OR(WEEKDAY($B9)=1;WEEKDAY($B9)=7))', bg: 'E2EFDA' },
     { range: 'E9:E450', formula: '=LEFT($A9;2)="K|"', bg: 'F4C7C3' },
@@ -246,7 +250,7 @@ function driverSheet(plan, d, template) {
     { range: 'B9:C450', formula: '=AND(ISNUMBER($B9);$B9<TODAY();$E9="")', bg: 'D9D9D9', color: '808080' },
     { range: 'D9:D450', formula: '=AND(ISNUMBER($B9);$E9<>"";$D9="")', bg: 'F4C7C3' },
     { range: 'B9:L450', formula: '=$B9=TODAY()', bg: 'FFF2CC', bold: true },
-    { range: 'F9:F450', formula: gratOff, bg: 'EFEFEF', color: 'A6A6A6' }
+    { range: 'F9:F450', formula: '=$N$2="NÃO"', bg: 'EFEFEF', color: 'A6A6A6' }
   );
   ws.role = template ? 'modelo-motorista' : 'motorista';
   ws.ref = template ? 'modelo-motorista' : d.id;
