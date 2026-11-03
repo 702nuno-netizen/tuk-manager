@@ -1,0 +1,835 @@
+/* Regras do negócio. O mesmo modelo serve a demonstração e a folha. */
+
+import {
+  MESES, addDays, cellFromParts, daysInMonth, iso, monthEnd, monthStart, pad, parseISO,
+  partsFromCell, plateBad, plateText, round2, sum, tukTitle, ym
+} from './format.js';
+
+export function factoryTypes() {
+  return [
+    { id: 'g1', name: 'Combustível', freq: 'Diário', repeat: false, scope: 'combustão', active: true },
+    { id: 'g2', name: 'Outros', freq: 'Diário', repeat: false, scope: 'todos', active: true },
+    { id: 'g3', name: 'Garagem', freq: 'Mensal', repeat: true, scope: 'todos', active: true },
+    { id: 'g4', name: 'Manutenção', freq: 'Mensal', repeat: false, scope: 'todos', active: true }
+  ];
+}
+
+export function blankYear(year) {
+  return {
+    year,
+    businessName: '',
+    tipsEnabled: true,
+    tuks: [],
+    drivers: [],
+    pct: [],
+    types: factoryTypes(),
+    fixed: [],
+    objectives: Array.from({ length: 12 }, (_, i) => ({ month: i + 1, amount: 0 })),
+    prizes: [{ from: iso(year, 1, 1), active: false, amount: 0 }],
+    days: {},
+    tukDays: {},
+    tukMonths: {},
+    notices: [],
+    prior: null
+  };
+}
+
+export function driver(model, id) { return model.drivers.find(d => d.id === id) || null; }
+export function tuk(model, id) { return model.tuks.find(t => t.id === id) || null; }
+export function typeById(model, id) { return model.types.find(t => t.id === id) || null; }
+
+export function activeDrivers(model) {
+  return model.drivers.filter(d => d.active);
+}
+
+export function visibleTuks(model, date) {
+  return model.tuks.filter(t => t.status !== 'vendido' && !(t.soldOn && date && t.soldOn <= date));
+}
+
+export function pctAt(model, driverId, date) {
+  let best = null;
+  for (const p of model.pct) {
+    if (p.driverId === driverId && p.from <= date && (!best || p.from >= best.from)) best = p;
+  }
+  return best || { driverId, from: '', pct: 0, role: 'motorista' };
+}
+
+export function isOwnerAt(model, driverId, date) {
+  return pctAt(model, driverId, date).role === 'patrão';
+}
+
+export function currentOwner(model, date) {
+  return model.drivers.find(d => isOwnerAt(model, d.id, date)) || null;
+}
+
+export function prizeAt(model, year, month) {
+  const end = monthEnd(year, month);
+  let best = null;
+  for (const p of model.prizes) {
+    if (p.from <= end && (!best || p.from >= best.from)) best = p;
+  }
+  if (!best) return { active: false, amount: 0, from: '' };
+  return { active: !!best.active, amount: best.active ? round2(best.amount) : 0, from: best.from, raw: round2(best.amount) };
+}
+
+export function fixedAt(model, typeId, tukId, year, month) {
+  const end = monthEnd(year, month);
+  let best = null;
+  for (const f of model.fixed) {
+    if (f.typeId === typeId && f.tukId === tukId && f.from <= end && (!best || f.from >= best.from)) best = f;
+  }
+  return best ? round2(best.amount) : 0;
+}
+
+export function dayRec(model, driverId, date) {
+  return (model.days[driverId] || {})[date] || null;
+}
+
+function ensureDay(model, driverId, date) {
+  if (!model.days[driverId]) model.days[driverId] = {};
+  if (!model.days[driverId][date]) {
+    model.days[driverId][date] = { tukId: null, services: [], grat: [], entregue: [], note: '', locked: false };
+  }
+  return model.days[driverId][date];
+}
+
+export function tukDay(model, tukId, date) {
+  return (model.tukDays[tukId] || {})[date] || null;
+}
+
+function ensureTukDay(model, tukId, date) {
+  if (!model.tukDays[tukId]) model.tukDays[tukId] = {};
+  if (!model.tukDays[tukId][date]) model.tukDays[tukId][date] = { byType: {}, note: '' };
+  return model.tukDays[tukId][date];
+}
+
+export function monthCell(model, tukId, year, month, typeId) {
+  const key = ym(year, month);
+  return (((model.tukMonths[tukId] || {})[key] || {})[typeId]) || null;
+}
+
+function ensureMonthCell(model, tukId, year, month, typeId) {
+  const key = ym(year, month);
+  if (!model.tukMonths[tukId]) model.tukMonths[tukId] = {};
+  if (!model.tukMonths[tukId][key]) model.tukMonths[tukId][key] = {};
+  if (!model.tukMonths[tukId][key][typeId]) model.tukMonths[tukId][key][typeId] = { parts: [], auto: false, note: '' };
+  return model.tukMonths[tukId][key][typeId];
+}
+
+export function monthReached(model, year, month) {
+  return monthStart(year, month) <= model.today;
+}
+
+export function appliesToTuk(tp, t) {
+  if (!tp || !t) return false;
+  if (tp.scope === 'combustão' && t.fuel !== 'combustão') return false;
+  return true;
+}
+
+export function dailyTypes(model, tuk) {
+  return model.types.filter(t => t.active && t.freq === 'Diário' && (!tuk || appliesToTuk(t, tuk)));
+}
+
+export function monthlyTypes(model) {
+  return model.types.filter(t => t.active && t.freq === 'Mensal');
+}
+
+function nextId(list, prefix) {
+  let n = 0;
+  const re = new RegExp('^' + prefix + '(\\d+)$');
+  for (const x of list) {
+    const m = re.exec(x.id || '');
+    if (m) n = Math.max(n, Number(m[1]));
+  }
+  return prefix + (n + 1);
+}
+
+export function driverDays(model, driverId, year, month) {
+  const bag = model.days[driverId] || {};
+  const prefix = month ? `${year}-${pad(month)}-` : `${year}-`;
+  const out = [];
+  for (const date of Object.keys(bag)) {
+    if (date.startsWith(prefix)) out.push({ date, rec: bag[date] });
+  }
+  out.sort((a, b) => a.date < b.date ? -1 : 1);
+  return out;
+}
+
+export function faturadoOf(rec) {
+  if (!rec || !rec.services || !rec.services.length) return 0;
+  return sum(rec.services);
+}
+
+export function workedDay(rec) {
+  return !!(rec && rec.services && rec.services.length && faturadoOf(rec) > 0);
+}
+
+export function sharesOf(model, driverId, date, rec) {
+  const fat = faturadoOf(rec);
+  if (!rec || !rec.services.length) return { fat: 0, pct: 0, driver: 0, owner: 0, ownerRole: isOwnerAt(model, driverId, date) };
+  const row = pctAt(model, driverId, date);
+  const ownerRole = row.role === 'patrão';
+  if (ownerRole) return { fat, pct: 0, driver: 0, owner: 0, ownerRole: true };
+  const driverPart = round2(fat * row.pct);
+  return { fat, pct: row.pct, driver: driverPart, owner: round2(fat - driverPart), ownerRole: false };
+}
+
+export function dayExpense(model, tukId, date) {
+  const rec = tukDay(model, tukId, date);
+  if (!rec) return { total: 0, byType: {} };
+  const byType = {};
+  let total = 0;
+  for (const [id, parts] of Object.entries(rec.byType || {})) {
+    const v = sum(parts);
+    if (v) { byType[id] = v; total += v; }
+  }
+  return { total: round2(total), byType };
+}
+
+/** Valor mensal que conta: mês já chegou; célula escrita ganha; senão o fixo, se repetir. */
+export function monthlyAmount(model, tukId, year, month, typeId) {
+  const tp = typeById(model, typeId);
+  if (!tp || tp.freq !== 'Mensal') return { amount: 0, parts: [], auto: false, counts: false, note: '' };
+  const t = tuk(model, tukId);
+  if (t && t.soldOn && monthStart(year, month) > t.soldOn) return { amount: 0, parts: [], auto: false, counts: false, note: '' };
+  if (!appliesToTuk(tp, t)) return { amount: 0, parts: [], auto: false, counts: false, note: '' };
+  const cell = monthCell(model, tukId, year, month, typeId);
+  const parts = cell && cell.parts && cell.parts.length ? cell.parts.slice() : [];
+  const written = parts.length ? sum(parts) : null;
+  const reached = monthReached(model, year, month);
+  if (!reached) return { amount: 0, parts, auto: !!(cell && cell.auto), counts: false, note: cell ? cell.note : '' };
+  if (written != null) return { amount: written, parts, auto: !!(cell && cell.auto), counts: true, note: cell ? cell.note : '' };
+  if (tp.repeat) {
+    const exp = fixedAt(model, typeId, tukId, year, month);
+    if (exp > 0) return { amount: exp, parts: [exp], auto: true, counts: true, note: '' };
+  }
+  return { amount: 0, parts: [], auto: false, counts: false, note: '' };
+}
+
+export function whoDrives(model, tukId, date) {
+  const found = [];
+  for (const d of model.drivers) {
+    const rec = dayRec(model, d.id, date);
+    if (rec && rec.tukId === tukId) found.push(d);
+  }
+  return found;
+}
+
+export function driverMonth(model, driverId, year, month) {
+  const rows = driverDays(model, driverId, year, month);
+  let fat = 0, driverPart = 0, ownerPart = 0, entregue = 0, grat = 0, days = 0;
+  const end = monthEnd(year, month);
+  const ownerNow = isOwnerAt(model, driverId, end);
+  for (const { date, rec } of rows) {
+    const sh = sharesOf(model, driverId, date, rec);
+    fat = round2(fat + sh.fat);
+    driverPart = round2(driverPart + sh.driver);
+    ownerPart = round2(ownerPart + sh.owner);
+    entregue = round2(entregue + sum(rec.entregue));
+    grat = round2(grat + sum(rec.grat));
+    if (workedDay(rec)) days += 1;
+  }
+  const opening = driver(model, driverId)?.opening || 0;
+  return {
+    fat, driverPart, ownerPart, entregue, grat, days, ownerNow,
+    saldo: ownerNow ? 0 : round2(entregue - ownerPart),
+    saldoAno: ownerNow ? 0 : round2(opening + yearBalance(model, driverId, year))
+  };
+}
+
+function yearBalance(model, driverId, year) {
+  let s = 0;
+  for (const { date, rec } of driverDays(model, driverId, year)) {
+    const sh = sharesOf(model, driverId, date, rec);
+    if (sh.ownerRole) continue;
+    s = round2(s + sum(rec.entregue) - sh.owner);
+  }
+  return s;
+}
+
+export function saldoAte(model, driverId, year) {
+  const d = driver(model, driverId);
+  if (!d) return 0;
+  return round2((d.opening || 0) + yearBalance(model, driverId, year));
+}
+
+export function tukMonth(model, tukId, year, month) {
+  const prefix = `${year}-${pad(month)}-`;
+  const bag = model.tukDays[tukId] || {};
+  let daily = 0;
+  const dailyByType = {};
+  const dailyDays = {};
+  const who = {};
+  let serviceDays = 0;
+  let fat = 0;
+  for (const d of model.drivers) {
+    for (const { date, rec } of driverDays(model, d.id, year, month)) {
+      if (rec.tukId !== tukId) continue;
+      const f = faturadoOf(rec);
+      if (f > 0) {
+        fat = round2(fat + f);
+        serviceDays += 1;
+        who[d.id] = (who[d.id] || 0) + 1;
+      }
+    }
+  }
+  for (const date of Object.keys(bag)) {
+    if (!date.startsWith(prefix)) continue;
+    const ex = dayExpense(model, tukId, date);
+    daily = round2(daily + ex.total);
+    for (const [id, v] of Object.entries(ex.byType)) {
+      dailyByType[id] = round2((dailyByType[id] || 0) + v);
+      if (!dailyDays[id]) dailyDays[id] = 0;
+      if (v > 0) dailyDays[id] += 1;
+    }
+  }
+  let monthly = 0;
+  const monthlyByType = {};
+  for (const tp of model.types) {
+    if (tp.freq !== 'Mensal') continue;
+    const info = monthlyAmount(model, tukId, year, month, tp.id);
+    if (info.counts && info.amount) {
+      monthly = round2(monthly + info.amount);
+      monthlyByType[tp.id] = info;
+    } else {
+      monthlyByType[tp.id] = info;
+    }
+  }
+  const desp = round2(daily + monthly);
+  return { fat, daily, monthly, desp, lucro: round2(fat - desp), serviceDays, who, dailyByType, dailyDays, monthlyByType };
+}
+
+export function monthView(model, year, month) {
+  const drivers = [];
+  let fat = 0, grat = 0, workers = 0, prizes = 0, ownerFat = 0, ownerParts = 0;
+  const obj = (model.objectives.find(o => o.month === month) || {}).amount || 0;
+  const prize = prizeAt(model, year, month);
+  for (const d of model.drivers) {
+    const r = driverMonth(model, d.id, year, month);
+    const owner = isOwnerAt(model, d.id, monthEnd(year, month));
+    const reached = r.fat > 0 && r.fat + 1e-9 >= obj;
+    const gets = !owner && prize.active && reached;
+    if (gets) prizes = round2(prizes + prize.amount);
+    if (r.days > 0) workers += 1;
+    fat = round2(fat + r.fat);
+    grat = round2(grat + r.grat);
+    if (owner) ownerFat = round2(ownerFat + r.fat);
+    else ownerParts = round2(ownerParts + r.ownerPart);
+    drivers.push({
+      id: d.id, name: d.name, active: d.active, owner, pct: pctAt(model, d.id, monthEnd(year, month)).pct,
+      ...r, reached, prize: gets ? prize.amount : 0
+    });
+  }
+  let desp = 0;
+  const tuks = [];
+  const cat = {};
+  for (const t of model.tuks) {
+    const tm = tukMonth(model, t.id, year, month);
+    desp = round2(desp + tm.desp);
+    tuks.push({ id: t.id, ...tm, tuk: t });
+    for (const tp of model.types) {
+      const add = tp.freq === 'Diário' ? (tm.dailyByType[tp.id] || 0) : ((tm.monthlyByType[tp.id] && tm.monthlyByType[tp.id].counts) ? tm.monthlyByType[tp.id].amount : 0);
+      if (add) cat[tp.id] = round2((cat[tp.id] || 0) + add);
+    }
+  }
+  const companyObj = round2(obj * workers);
+  const ganho = round2(ownerFat + ownerParts - desp - prizes);
+  let tukDays = 0;
+  for (const t of tuks) tukDays += t.serviceDays;
+  return {
+    year, month, obj, prize, fat, desp, lucro: round2(fat - desp), grat, workers, companyObj, prizes,
+    ownerFat, ownerParts, ganho, drivers, tuks, cat, tukDays,
+    pct: companyObj > 0 ? fat / companyObj : 0
+  };
+}
+
+export function yearView(model) {
+  const year = model.year;
+  const months = [];
+  let fat = 0, desp = 0, grat = 0, tukDays = 0, planned = 0;
+  const cat = {};
+  const byDriver = {};
+  const byTuk = {};
+  for (const d of model.drivers) byDriver[d.id] = 0;
+  for (const t of model.tuks) byTuk[t.id] = 0;
+  const activeN = activeDrivers(model).length;
+  for (let m = 1; m <= 12; m++) {
+    const mv = monthView(model, year, m);
+    const plan = round2((model.objectives.find(o => o.month === m)?.amount || 0) * activeN);
+    months.push({ month: m, ...mv, plan });
+    fat = round2(fat + mv.fat);
+    desp = round2(desp + mv.desp);
+    grat = round2(grat + mv.grat);
+    tukDays += mv.tukDays;
+    planned = round2(planned + plan);
+    for (const [id, v] of Object.entries(mv.cat)) cat[id] = round2((cat[id] || 0) + v);
+    for (const d of mv.drivers) byDriver[d.id] = round2((byDriver[d.id] || 0) + d.fat);
+    for (const t of mv.tuks) byTuk[t.id] = round2((byTuk[t.id] || 0) + t.fat);
+  }
+  return {
+    year, fat, desp, lucro: round2(fat - desp), grat, tukDays, planned,
+    pct: planned > 0 ? fat / planned : 0,
+    avg: tukDays ? round2(fat / tukDays) : 0,
+    months, cat, byDriver, byTuk, activeN
+  };
+}
+
+export function dayCompany(model, date) {
+  const { y, m } = parseISO(date);
+  let fat = 0, desp = 0, working = 0;
+  const people = [];
+  const tukRows = [];
+  for (const d of activeDrivers(model)) {
+    const rec = dayRec(model, d.id, date);
+    const sh = sharesOf(model, d.id, date, rec);
+    const owner = sh.ownerRole;
+    const tukId = rec && rec.tukId;
+    if (sh.fat > 0 || (rec && rec.services && rec.services.length)) working += sh.fat > 0 || (rec && rec.services.length) ? 1 : 0;
+    if (rec && rec.services && rec.services.length && sh.fat === 0) working += 0;
+    fat = round2(fat + sh.fat);
+    const due = owner ? 0 : round2(sh.owner - sum(rec ? rec.entregue : []));
+    people.push({
+      driver: d, rec, sh, owner, tuk: tukId ? tuk(model, tukId) : null,
+      grat: sum(rec ? rec.grat : []),
+      entregue: sum(rec ? rec.entregue : []),
+      due, services: rec && rec.services ? rec.services.length : 0,
+      semTuk: !tukId
+    });
+  }
+  /* working = drivers with a tuk and (services or explicit zero) OR with services */
+  working = people.filter(p => p.rec && p.rec.tukId && p.rec.services && p.rec.services.length).length;
+  for (const t of model.tuks) {
+    if (t.status === 'vendido') continue;
+    const ex = dayExpense(model, t.id, date);
+    desp = round2(desp + ex.total);
+    const drivers = whoDrives(model, t.id, date).filter(d => d.active);
+    let tf = 0;
+    for (const d of drivers) tf = round2(tf + faturadoOf(dayRec(model, d.id, date)));
+    tukRows.push({ tuk: t, ex, drivers, fat: tf });
+  }
+  const mv = monthView(model, y, m);
+  return { date, fat, desp, lucro: round2(fat - desp), working, people, tukRows, month: mv };
+}
+
+export function suggestFromPrior(prior) {
+  if (!prior) return null;
+  return prior.map(row => {
+    if (!row || !row.workers) return 0;
+    return Math.round(row.faturado / row.workers);
+  });
+}
+
+/** Escreve os gastos fixos que já contam (mês já chegou) quando a célula está vazia. */
+export function ensureRecurring(model) {
+  const year = model.year;
+  for (const tp of model.types) {
+    if (!tp.active || tp.freq !== 'Mensal' || !tp.repeat) continue;
+    for (const t of model.tuks) {
+      if (!appliesToTuk(tp, t)) continue;
+      for (let m = 1; m <= 12; m++) {
+        if (!monthReached(model, year, m)) continue;
+        if (t.soldOn && monthStart(year, m) > t.soldOn) continue;
+        const cell = monthCell(model, t.id, year, m, tp.id);
+        if (cell && cell.parts && cell.parts.length) continue;
+        const amt = fixedAt(model, tp.id, t.id, year, m);
+        if (amt > 0) {
+          const c = ensureMonthCell(model, t.id, year, m, tp.id);
+          c.parts = [amt];
+          c.auto = true;
+        }
+      }
+    }
+  }
+  return model;
+}
+
+function pushFixed(model, typeId, tukId, from, amount) {
+  const hit = model.fixed.find(f => f.typeId === typeId && f.tukId === tukId && f.from === from);
+  if (hit) hit.amount = round2(amount);
+  else model.fixed.push({ typeId, tukId, from, amount: round2(amount) });
+}
+
+function rewriteAutoFrom(model, typeId, tukId, from, amount) {
+  const year = model.year;
+  for (let m = 1; m <= 12; m++) {
+    if (monthEnd(year, m) < from) continue;
+    if (!monthReached(model, year, m)) continue;
+    const cell = ensureMonthCell(model, tukId, year, m, typeId);
+    cell.parts = amount > 0 ? [round2(amount)] : [];
+    cell.auto = true;
+  }
+}
+
+function requireTuk(model, driverId, date) {
+  const rec = dayRec(model, driverId, date);
+  if (!rec || !rec.tukId) return 'Escolhe primeiro um tuk';
+  return '';
+}
+
+export function apply(model, action) {
+  const next = structuredClone(model);
+  const res = mutate(next, action) || {};
+  return { model: next, toast: res.toast || '', error: res.error || '' };
+}
+
+function mutate(model, a) {
+  switch (a.type) {
+    case 'set-business': {
+      const name = String(a.name || '').trim().slice(0, 60);
+      if (!name) return { error: 'O negócio precisa de um nome' };
+      model.businessName = name;
+      return {};
+    }
+    case 'set-tips': {
+      model.tipsEnabled = !!a.on;
+      return { toast: a.on ? 'Gratificações ligadas' : 'Gratificações desligadas. A coluna fica escondida; os valores mantêm-se.' };
+    }
+    case 'assign-tuk': {
+      const d = driver(model, a.driverId);
+      if (!d || !d.active) return { error: 'Este motorista está inativo' };
+      const t = tuk(model, a.tukId);
+      if (!t || t.status === 'vendido') return { error: 'Este tuk não está disponível' };
+      if (t.soldOn && a.date >= t.soldOn) return { error: 'Este tuk já estava vendido nessa data' };
+      let toast = '';
+      for (const other of model.drivers) {
+        if (other.id === d.id) continue;
+        const rec = dayRec(model, other.id, a.date);
+        if (rec && rec.tukId === t.id) {
+          rec.tukId = null;
+          model.notices.unshift({
+            id: 'n' + Date.now().toString(36),
+            date: a.date,
+            fromId: other.id,
+            toId: d.id,
+            tukId: t.id,
+            time: a.time || ''
+          });
+          toast = `${tukTitle(t)} passou para o ${d.name}. O ${other.name} ficou sem tuk.`;
+        }
+      }
+      const rec = ensureDay(model, d.id, a.date);
+      rec.tukId = t.id;
+      return { toast };
+    }
+    case 'add-service': {
+      const err = requireTuk(model, a.driverId, a.date);
+      if (err) return { error: err };
+      const amount = round2(a.amount);
+      if (!(amount >= 0)) return { error: 'Valor inválido' };
+      const rec = ensureDay(model, a.driverId, a.date);
+      if (rec.services.length === 1 && rec.services[0] === 0) rec.services = [];
+      rec.services.push(amount);
+      return {};
+    }
+    case 'set-service': {
+      const err = requireTuk(model, a.driverId, a.date);
+      if (err) return { error: err };
+      const rec = ensureDay(model, a.driverId, a.date);
+      if (a.amount == null) rec.services.splice(a.index, 1);
+      else rec.services[a.index] = round2(a.amount);
+      return {};
+    }
+    case 'zero-day': {
+      const err = requireTuk(model, a.driverId, a.date);
+      if (err) return { error: err };
+      const rec = ensureDay(model, a.driverId, a.date);
+      rec.services = [0];
+      return { toast: 'Dia a zero' };
+    }
+    case 'add-grat': {
+      if (!isOwnerAt(model, a.driverId, a.date)) return { error: 'Só o patrão tem gratificações' };
+      if (!model.tipsEnabled) return { error: 'As gratificações estão desligadas' };
+      const err = requireTuk(model, a.driverId, a.date);
+      if (err) return { error: err };
+      const rec = ensureDay(model, a.driverId, a.date);
+      rec.grat.push(round2(a.amount));
+      return {};
+    }
+    case 'set-grat': {
+      const rec = ensureDay(model, a.driverId, a.date);
+      if (a.amount == null) rec.grat.splice(a.index, 1);
+      else rec.grat[a.index] = round2(a.amount);
+      return {};
+    }
+    case 'add-entrega': {
+      if (isOwnerAt(model, a.driverId, a.date)) return { error: 'O patrão não entrega' };
+      const err = requireTuk(model, a.driverId, a.date);
+      if (err) return { error: err };
+      const rec = ensureDay(model, a.driverId, a.date);
+      rec.entregue.push(round2(a.amount));
+      return {};
+    }
+    case 'set-entrega': {
+      const rec = ensureDay(model, a.driverId, a.date);
+      if (a.amount == null) rec.entregue.splice(a.index, 1);
+      else rec.entregue[a.index] = round2(a.amount);
+      return {};
+    }
+    case 'set-note': {
+      const err = requireTuk(model, a.driverId, a.date);
+      if (err) return { error: err };
+      const rec = ensureDay(model, a.driverId, a.date);
+      rec.note = String(a.note || '').slice(0, 280);
+      return {};
+    }
+    case 'add-daily': {
+      const t = tuk(model, a.tukId);
+      const tp = typeById(model, a.typeId);
+      if (!t || !tp || tp.freq !== 'Diário' || !tp.active) return { error: 'Tipo de gasto indisponível' };
+      if (!appliesToTuk(tp, t)) return { error: 'Este gasto não se aplica a este tuk' };
+      const cell = ensureTukDay(model, t.id, a.date);
+      if (!cell.byType[tp.id]) cell.byType[tp.id] = [];
+      cell.byType[tp.id].push(round2(a.amount));
+      return {};
+    }
+    case 'set-daily': {
+      const cell = ensureTukDay(model, a.tukId, a.date);
+      const arr = cell.byType[a.typeId] || [];
+      if (a.amount == null) arr.splice(a.index, 1);
+      else arr[a.index] = round2(a.amount);
+      cell.byType[a.typeId] = arr;
+      return {};
+    }
+    case 'set-tuk-note': {
+      const cell = ensureTukDay(model, a.tukId, a.date);
+      cell.note = String(a.note || '').slice(0, 280);
+      return {};
+    }
+    case 'add-monthly': {
+      const tp = typeById(model, a.typeId);
+      const t = tuk(model, a.tukId);
+      if (!tp || tp.freq !== 'Mensal' || !tp.active) return { error: 'Tipo mensal indisponível' };
+      if (!appliesToTuk(tp, t)) return { error: 'Este gasto não se aplica a este tuk' };
+      const cell = ensureMonthCell(model, a.tukId, a.year, a.month, tp.id);
+      if (cell.auto && cell.parts.length === 1 && tp.repeat) {
+        /* passar de valor fixo para soma manual */
+      }
+      cell.parts = (cell.parts || []).concat([round2(a.amount)]);
+      cell.auto = false;
+      return {};
+    }
+    case 'set-monthly-part': {
+      const cell = ensureMonthCell(model, a.tukId, a.year, a.month, a.typeId);
+      if (a.amount == null) cell.parts.splice(a.index, 1);
+      else cell.parts[a.index] = round2(a.amount);
+      cell.auto = false;
+      return {};
+    }
+    case 'set-fixed': {
+      const from = monthStart(a.year, a.month);
+      pushFixed(model, a.typeId, a.tukId, from, a.amount);
+      rewriteAutoFrom(model, a.typeId, a.tukId, from, round2(a.amount));
+      return { toast: 'Valor novo a partir deste mês. Os meses anteriores ficam como estavam.' };
+    }
+    case 'set-objective': {
+      const row = model.objectives.find(o => o.month === a.month);
+      if (row) row.amount = Math.max(0, round2(a.amount));
+      return {};
+    }
+    case 'set-objectives': {
+      (a.amounts || []).forEach((v, i) => {
+        const row = model.objectives.find(o => o.month === i + 1);
+        if (row && v != null) row.amount = Math.max(0, round2(v));
+      });
+      return { toast: 'Objetivos atualizados. Podes alterar cada mês.' };
+    }
+    case 'set-prize': {
+      const from = monthStart(a.year, a.month);
+      const hit = model.prizes.find(p => p.from === from);
+      if (hit) { hit.active = !!a.active; hit.amount = round2(a.amount); }
+      else model.prizes.push({ from, active: !!a.active, amount: round2(a.amount) });
+      model.prizes.sort((x, y) => x.from < y.from ? -1 : 1);
+      return { toast: a.active ? 'Prémio atualizado a partir deste mês' : 'Prémio desligado a partir deste mês. O cumprido continua a aparecer.' };
+    }
+    case 'add-driver': {
+      if (model.drivers.length >= 50) return { error: 'O limite é 50 motoristas' };
+      const name = String(a.name || '').trim();
+      if (!name) return { error: 'Falta o nome' };
+      const id = nextId(model.drivers, 'm');
+      model.drivers.push({ id, name, phone: '', since: a.since || model.today, active: a.active !== false, opening: 0 });
+      const role = a.owner ? 'patrão' : 'motorista';
+      if (a.owner) {
+        for (const p of model.pct) {
+          if (p.role === 'patrão' && p.from <= (a.since || model.today)) {
+            /* o patrão anterior passa a motorista nesta data */
+          }
+        }
+        demoteOwner(model, a.since || model.today, a.fallbackPct ?? 0.5);
+      }
+      model.pct.push({ driverId: id, from: a.since || model.today, pct: role === 'patrão' ? 0 : round2(a.pct ?? 0.5), role });
+      return { toast: `${name} entrou`, id };
+    }
+    case 'update-driver': {
+      const d = driver(model, a.id);
+      if (!d) return { error: 'Motorista em falta' };
+      if (a.name != null) {
+        const name = String(a.name).trim();
+        if (!name) return { error: 'Falta o nome' };
+        d.name = name;
+      }
+      if (a.active != null) d.active = !!a.active;
+      if (a.owner != null || a.pct != null) {
+        const from = a.from || model.today;
+        const owner = a.owner != null ? !!a.owner : isOwnerAt(model, d.id, from);
+        if (owner) {
+          demoteOwner(model, from, a.fallbackPct ?? 0.5, d.id);
+          upsertPct(model, d.id, from, 0, 'patrão');
+        } else {
+          const pct = a.pct != null ? round2(a.pct) : (pctAt(model, d.id, from).pct || 0.5);
+          if (pct < 0 || pct > 1) return { error: 'A percentagem tem de estar entre 0 e 100' };
+          upsertPct(model, d.id, from, pct, 'motorista');
+        }
+      }
+      return { toast: 'Motorista atualizado' };
+    }
+    case 'add-tuk': {
+      if (model.tuks.length >= 50) return { error: 'O limite é 50 tuks' };
+      const number = Number(a.number);
+      if (!(number >= 1 && number <= 50)) return { error: 'Escolhe um número de 1 a 50' };
+      if (model.tuks.some(t => t.number === number)) return { error: 'Esse número já está a ser usado' };
+      if (a.fuel !== 'combustão' && a.fuel !== 'elétrico') return { error: 'Escolhe combustão ou elétrico' };
+      const id = nextId(model.tuks, 't');
+      const t = {
+        id, number, nickname: String(a.nickname || '').trim(), plate: plateText(a.plate),
+        fuel: a.fuel, status: 'ativo', soldOn: ''
+      };
+      model.tuks.push(t);
+      model.tuks.sort((x, y) => x.number - y.number);
+      if (a.garage) {
+        for (const tp of model.types) {
+          if (tp.repeat && tp.freq === 'Mensal' && /garagem/i.test(tp.name)) {
+            pushFixed(model, tp.id, id, monthStart(model.year, parseISO(model.today).m), round2(a.garage));
+          }
+        }
+      }
+      const warn = plateBad(t.plate) ? ' Matrícula fora do formato AA-00-AA (só um aviso).' : '';
+      return { toast: `${tukTitle(t)} adicionado.${warn}`, id };
+    }
+    case 'update-tuk': {
+      const t = tuk(model, a.id);
+      if (!t) return { error: 'Tuk em falta' };
+      if (a.nickname != null) t.nickname = String(a.nickname).trim();
+      if (a.plate != null) t.plate = plateText(a.plate);
+      if (a.fuel === 'combustão' || a.fuel === 'elétrico') t.fuel = a.fuel;
+      if (a.number != null) {
+        const number = Number(a.number);
+        if (!(number >= 1 && number <= 50)) return { error: 'Número de 1 a 50' };
+        if (model.tuks.some(x => x.id !== t.id && x.number === number)) return { error: 'Esse número já está a ser usado' };
+        t.number = number;
+      }
+      if (a.sold === true) {
+        t.status = 'vendido';
+        t.soldOn = a.soldOn || model.today;
+        const { y, m } = parseISO(model.today);
+        for (const tp of model.types) {
+          if (tp.freq === 'Mensal' && tp.repeat) {
+            pushFixed(model, tp.id, t.id, monthStart(y, m), 0);
+            rewriteAutoFrom(model, tp.id, t.id, monthStart(y, m), 0);
+          }
+        }
+      } else if (a.sold === false) {
+        t.status = 'ativo';
+        t.soldOn = '';
+      }
+      const warn = plateBad(t.plate) ? ' Matrícula fora do formato AA-00-AA (só um aviso).' : '';
+      return { toast: 'Tuk atualizado.' + warn };
+    }
+    case 'add-type': {
+      const name = String(a.name || '').trim();
+      if (!name) return { error: 'Falta o nome' };
+      if (model.types.some(t => t.active && t.name.toLowerCase() === name.toLowerCase())) return { error: 'Já existe um tipo com esse nome' };
+      const freq = a.freq === 'Mensal' ? 'Mensal' : 'Diário';
+      const id = nextId(model.types, 'g');
+      model.types.push({
+        id, name, freq, repeat: freq === 'Mensal' ? !!a.repeat : false,
+        scope: a.scope === 'combustão' ? 'combustão' : 'todos', active: true
+      });
+      if (freq === 'Mensal' && a.repeat && a.amount) {
+        const { y, m } = parseISO(model.today);
+        const targets = a.tukId ? model.tuks.filter(t => t.id === a.tukId) : model.tuks.filter(t => t.status !== 'vendido');
+        for (const t of targets) {
+          if (a.scope === 'combustão' && t.fuel !== 'combustão') continue;
+          pushFixed(model, id, t.id, monthStart(y, m), round2(a.amount));
+        }
+        ensureRecurring(model);
+      }
+      return { toast: freq === 'Diário' ? 'Tipo diário criado. Na folha entra uma coluna antes do fim.' : 'Tipo mensal criado. Usa as linhas livres de cada mês.' };
+    }
+    case 'update-type': {
+      const tp = typeById(model, a.id);
+      if (!tp) return { error: 'Tipo em falta' };
+      if (a.name != null) {
+        const name = String(a.name).trim();
+        if (!name) return { error: 'Falta o nome' };
+        tp.name = name;
+      }
+      if (a.scope === 'combustão' || a.scope === 'todos') tp.scope = a.scope;
+      if (a.repeat != null && tp.freq === 'Mensal') tp.repeat = !!a.repeat;
+      if (a.active != null) tp.active = !!a.active;
+      return { toast: tp.active ? 'Tipo atualizado' : 'Tipo apagado. Os valores já lançados ficam na folha.' };
+    }
+    case 'ensure-recurring': {
+      ensureRecurring(model);
+      return {};
+    }
+    default:
+      return { error: 'Ação desconhecida' };
+  }
+}
+
+function demoteOwner(model, from, fallbackPct, exceptId) {
+  for (const d of model.drivers) {
+    if (d.id === exceptId) continue;
+    if (isOwnerAt(model, d.id, from)) {
+      const prev = pctAt(model, d.id, addDays(from, -1));
+      const pct = prev && prev.role === 'motorista' ? prev.pct : fallbackPct;
+      upsertPct(model, d.id, from, pct || 0.5, 'motorista');
+    }
+  }
+}
+
+function upsertPct(model, driverId, from, pct, role) {
+  const hit = model.pct.find(p => p.driverId === driverId && p.from === from);
+  if (hit) { hit.pct = role === 'patrão' ? 0 : round2(pct); hit.role = role; }
+  else model.pct.push({ driverId, from, pct: role === 'patrão' ? 0 : round2(pct), role });
+}
+
+export function openingBalances(model) {
+  const out = {};
+  for (const d of model.drivers) {
+    if (isOwnerAt(model, d.id, monthEnd(model.year, 12))) out[d.id] = 0;
+    else out[d.id] = saldoAte(model, d.id, model.year);
+  }
+  return out;
+}
+
+/** Ano novo: configuração e saldos, sem os dias. */
+export function carryYear(model, newYear) {
+  const open = openingBalances(model);
+  const end = monthEnd(model.year, 12);
+  const next = blankYear(newYear);
+  next.businessName = model.businessName;
+  next.tipsEnabled = model.tipsEnabled;
+  next.tuks = model.tuks.map(t => ({ ...t }));
+  next.drivers = model.drivers.map(d => ({ ...d, opening: round2(open[d.id] || 0), since: d.since }));
+  next.types = model.types.map(t => ({ ...t }));
+  for (const d of model.drivers) {
+    const p = pctAt(model, d.id, end);
+    next.pct.push({ driverId: d.id, from: iso(newYear, 1, 1), pct: p.role === 'patrão' ? 0 : p.pct, role: p.role });
+  }
+  const prize = prizeAt(model, model.year, 12);
+  const last = model.prizes.slice().sort((a, b) => a.from < b.from ? -1 : 1).filter(p => p.from <= end).pop();
+  next.prizes = [{ from: iso(newYear, 1, 1), active: !!(last && last.active), amount: last ? last.amount : 0 }];
+  for (const t of model.tuks) {
+    for (const tp of model.types) {
+      if (tp.freq !== 'Mensal' || !tp.repeat) continue;
+      const amt = fixedAt(model, tp.id, t.id, model.year, 12);
+      if (amt) next.fixed.push({ typeId: tp.id, tukId: t.id, from: iso(newYear, 1, 1), amount: amt });
+    }
+  }
+  next.prior = yearView(model).months.map(m => ({ faturado: m.fat, workers: m.workers }));
+  return next;
+}
+
+export function servicesFormula(parts) { return cellFromParts(parts); }
+export { partsFromCell, MESES, plateBad };
