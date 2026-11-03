@@ -1,6 +1,7 @@
 /* Estado da app: demonstração neste aparelho, ou a folha do ano na Drive. */
 
 import { cellFromParts, civilToday, monthStart, pad } from './format.js';
+import { explainError, progressText } from './stages.js';
 import { DEMO_TODAY, buildDemo } from './demo.js';
 import { apply, blankYear, ensureRecurring, factoryTypes, isOwnerAt, normalizePct, PCT_START } from './model.js';
 import { buildBook, contextFromModel, driverTitle, tukTitle } from './sheet.js';
@@ -52,7 +53,10 @@ function persist() {
       model,
       file: state.file,
       pending: state.pending,
-      emailLabel: state.emailLabel
+      emailLabel: state.emailLabel,
+      build: state.build || null,
+      paintIndex: state.paintIndex || 0,
+      paintDone: !!state.paintDone
     }));
   } catch (e) { /* cheio ou privado */ }
 }
@@ -342,16 +346,25 @@ export async function createFromSetup(form) {
   model.pct.push({ driverId, from: PCT_START, pct: form.owner ? 0 : 0.5, role: form.owner ? 'patrão' : 'motorista' });
   if (form.owner) model.fixed.push({ typeId: 'g3', tukId, from: monthStart(year, Number(model.today.slice(5, 7))), amount: 0 });
   if (state.busy) return;
+  const same = state.build && !state.build.done && Number(state.build.year) === year;
+  state.build = {
+    fileId: same ? state.build.fileId : (state.file && Number(state.file.year) === year ? state.file.id : ''),
+    year,
+    index: same ? state.build.index || 0 : 0,
+    done: false,
+    model: same && state.build.index && state.build.model ? state.build.model : model
+  };
   state.busy = true;
   state.busyLabel = 'A criar a folha…';
   state.setupError = '';
+  state.setupReason = '';
   poke();
   try {
     const token = await TMGoogle.getToken();
-    const preferred = state.file && Number(state.file.year) === year ? state.file.id : '';
-    const created = await createBook(token, model, preferred);
+    const created = await createBook(token, state.build.model, state.build.fileId, progressHooks());
     const file = { ...created, year };
     state.file = file;
+    state.build = { fileId: file.id, year, index: state.setupTotal || state.build.index, done: true };
     persist();
     state.model = await loadBook(token, created.id, year);
     state.model.today = civilToday();
@@ -366,14 +379,9 @@ export async function createFromSetup(form) {
     state.emailLabel = 'Conta Google ligada';
     state.setupError = '';
     rememberJobs(before, state.model);
-    try { await maybeBackup(token, file); } catch (e) { /* a cópia não impede a entrada */ }
+    try { await maybeBackup(token, file, state.model); } catch (e) { /* a cópia não impede a entrada */ }
   } catch (e) {
-    if (e.fileId) {
-      state.file = { id: e.fileId, name: e.fileName || model.businessName, year, url: `https://docs.google.com/spreadsheets/d/${e.fileId}/edit` };
-    }
-    state.setupError = e.offline
-      ? 'Sem rede. Se a folha chegou a ser criada, fica na Drive. Quando voltares a ter ligação, toca em Tentar outra vez — uso a mesma.'
-      : 'Não consegui acabar a folha. Se ela já está na Drive, toca em Tentar outra vez: continuo nessa, sem criar outra.';
+    rememberFailure(e, model, year);
   }
   state.busy = false;
   state.busyLabel = '';
@@ -381,8 +389,62 @@ export async function createFromSetup(form) {
   poke();
 }
 
-async function maybeBackup(token, file) {
-  await backupFile(token, file);
+function progressHooks(prefix) {
+  const painting = !!prefix && prefix.indexOf('repor') >= 0;
+  return {
+    localIndex: painting ? (state.paintIndex || 0) : (state.build && state.build.index || 0),
+    onFile: async (file) => {
+      if (painting || (prefix && prefix.indexOf('cópia') >= 0)) return;
+      state.file = { id: file.id, name: file.name, year: file.year, url: file.url };
+      state.build = { ...(state.build || {}), fileId: file.id, year: file.year, done: false };
+      persist();
+    },
+    onProgress: async (info) => {
+      const text = prefix
+        ? `${prefix}, separador ${info.index + 1} de ${info.total}: ${info.label}`
+        : (info.text || progressText(info.index, info.total, info.label));
+      state.busyLabel = text;
+      state.setupIndex = info.index;
+      state.setupTotal = info.total;
+      poke();
+    },
+    onDone: async (index, fileId) => {
+      if (painting) {
+        state.paintIndex = index;
+        state.paintDone = !!(state.setupTotal && index >= state.setupTotal);
+        persist();
+        return;
+      }
+      if (prefix && prefix.indexOf('cópia') >= 0) return;
+      state.build = { ...(state.build || {}), fileId, index, done: false };
+      state.setupIndex = index;
+      persist();
+    }
+  };
+}
+
+function rememberFailure(e, model, year) {
+  if (e && e.fileId) {
+    state.file = { id: e.fileId, name: e.fileName || (model && model.businessName) || '', year, url: `https://docs.google.com/spreadsheets/d/${e.fileId}/edit` };
+    state.build = { ...(state.build || {}), fileId: e.fileId, year, done: false, model: (state.build && state.build.model) || model };
+  }
+  const why = (e && e.reason) || explainError(e);
+  const where = e && e.stepLabel ? ` no separador ${e.stepLabel}` : '';
+  state.setupReason = why + where;
+  state.setupError = 'Não consegui acabar a folha. ' + state.setupReason + '. Toca em Tentar outra vez: continuo nesta, sem criar outra.';
+  console.warn('[folha]', state.setupReason, e && e.body ? e.body : '');
+}
+
+async function maybeBackup(token, file, model) {
+  await backupFile(token, file, model, {
+    labelPrefix: 'A criar a cópia',
+    onProgress: async (info) => {
+      state.busyLabel = info.text || `A criar a cópia, separador ${info.index + 1} de ${info.total}: ${info.label}`;
+      state.setupIndex = info.index;
+      state.setupTotal = info.total;
+      poke();
+    }
+  });
 }
 
 export async function createYear(year) {
@@ -402,21 +464,25 @@ export async function createYear(year) {
   state.busy = true;
   state.busyLabel = 'A criar a folha…';
   poke();
+  let next = null;
   try {
     const token = await TMGoogle.getToken();
     const { carryYear } = await import('./model.js');
-    const next = carryYear(state.model, year);
+    next = carryYear(state.model, year);
     next.today = civilToday();
-    next.previousId = state.file.id;
-    const preferred = state.file && Number(state.file.year) === Number(year) ? state.file.id : '';
-    const created = await createBook(token, next, preferred);
+    next.previousId = state.file && state.file.id;
+    const preferred = state.build && Number(state.build.year) === Number(year) ? state.build.fileId : '';
+    state.build = { fileId: preferred || '', year, index: preferred ? (state.build.index || 0) : 0, done: false, model: next };
+    const created = await createBook(token, next, preferred, progressHooks());
     state.file = { ...created, year };
     state.model = await loadBook(token, created.id, year);
     state.model.today = civilToday();
     ensureRecurring(state.model);
+    state.build = { fileId: created.id, year, index: state.setupTotal || 0, done: true };
     note(`Folha de ${year} criada. Os saldos transitados já lá estão.`, false);
   } catch (e) {
-    note('Não consegui criar a folha desse ano.', true);
+    rememberFailure(e, next, year);
+    note(state.setupReason || 'Não consegui criar a folha desse ano.', true);
   }
   state.busy = false;
   state.busyLabel = '';
@@ -431,6 +497,8 @@ export async function restoreLook(recreate) {
     return;
   }
   if (state.busy) return;
+  if (state.paintDone) state.paintIndex = 0;
+  state.paintDone = false;
   state.busy = true;
   state.busyLabel = 'A repor o aspeto…';
   poke();
@@ -438,7 +506,7 @@ export async function restoreLook(recreate) {
     const token = await TMGoogle.getToken();
     const live = await loadBook(token, state.file.id, state.model.year);
     live.today = civilToday();
-    let result = await repaintBook(token, state.file.id, live);
+    let result = await repaintBook(token, state.file.id, live, progressHooks('A repor o aspeto'));
     if (result.missing.length && !recreate) {
       state.missing = result.missing;
       state.busy = false;
@@ -454,7 +522,7 @@ export async function restoreLook(recreate) {
       for (const ws of book.sheets.filter(s => result.missing.includes(s.title))) {
         await addSheetFromBook(token, state.file.id, ws, known);
       }
-      result = await repaintBook(token, state.file.id, live);
+      result = await repaintBook(token, state.file.id, live, progressHooks('A repor o aspeto'));
     }
     state.model = await loadBook(token, state.file.id, live.year);
     state.model.today = civilToday();
@@ -462,10 +530,28 @@ export async function restoreLook(recreate) {
     state.keys = {};
     note('Aspeto da folha reposto. Os valores que tinhas escrito mantêm-se.', false);
   } catch (e) {
-    note('Não consegui repor o aspeto.', true);
+    note((explainError(e) || 'Não consegui repor o aspeto.') + (e.stepLabel ? ' · ' + e.stepLabel : ''), true);
   }
   state.busy = false;
   state.busyLabel = '';
+  persist();
+  poke();
+}
+
+export function exitDemo() {
+  if (state.mode !== 'demo') return;
+  state.mode = null;
+  state.onboarded = false;
+  state.model = null;
+  state.file = null;
+  state.pending = [];
+  state.sheet = null;
+  state.toast = '';
+  state.toastHtml = '';
+  state.toastOn = false;
+  state.route = { name: 'inicio' };
+  state.emailLabel = '';
+  state.date = '';
   persist();
   poke();
 }
@@ -487,7 +573,42 @@ export async function boot() {
   TMGoogle.setClientId((window.TM_CONFIG && window.TM_CONFIG.clientId) || '');
   let saved = null;
   try { saved = JSON.parse(localStorage.getItem(KEY) || 'null'); } catch (e) { saved = null; }
-  if (saved && saved.onboarded && saved.model) {
+  if (saved && saved.build && !saved.build.done && saved.build.model && saved.build.fileId) {
+    state.build = saved.build;
+    state.file = { id: saved.build.fileId, year: saved.build.year, url: `https://docs.google.com/spreadsheets/d/${saved.build.fileId}/edit`, name: saved.build.model.businessName || '' };
+    state.emailLabel = saved.emailLabel || '';
+    state.route = { name: 'inicio' };
+    state.ready = true;
+    state.busy = true;
+    state.busyLabel = 'A continuar a folha…';
+    state.setupIndex = saved.build.index || 0;
+    poke();
+    try {
+      const token = await TMGoogle.silent();
+      if (!token) {
+        const err = new Error('sessao');
+        err.status = 401;
+        throw err;
+      }
+      const hooks = progressHooks();
+      hooks.localIndex = saved.build.index || 0;
+      const created = await createBook(token, saved.build.model, saved.build.fileId, hooks);
+      state.file = { ...created, year: saved.build.year };
+      state.build = { fileId: created.id, year: saved.build.year, index: state.setupTotal || saved.build.index || 0, done: true };
+      state.model = await loadBook(token, created.id, saved.build.year);
+      state.model.today = civilToday();
+      ensureRecurring(state.model);
+      state.mode = 'google';
+      state.onboarded = true;
+      state.date = state.model.today;
+      state.month = Number(String(state.model.today).slice(5, 7)) || 1;
+      state.route = { name: 'hoje' };
+      state.emailLabel = 'Conta Google ligada';
+      state.setupError = '';
+    } catch (e) {
+      rememberFailure(e, saved.build.model, saved.build.year);
+    }
+  } else if (saved && saved.onboarded && saved.model) {
     state.mode = saved.mode;
     state.onboarded = true;
     state.model = saved.model;
@@ -532,6 +653,8 @@ export async function boot() {
     state.route = { name: 'inicio' };
     if (saved && saved.file) state.file = saved.file;
     if (saved && saved.emailLabel) state.emailLabel = saved.emailLabel;
+    if (saved && saved.paintIndex) state.paintIndex = saved.paintIndex;
+    if (saved && saved.paintDone) state.paintDone = true;
   }
   state.ready = true;
   state.busy = false;

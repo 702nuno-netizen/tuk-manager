@@ -5,7 +5,7 @@ import { suggestions } from './view.js';
 import { render } from './view.js';
 import {
   state, subscribe, boot, dispatch, startDemo, connectGoogle, createFromSetup,
-  createYear, restoreLook, signOut, setRoute, setDate, setMonth, openSheet, closeSheet, clearToast, flush, note, armToast
+  createYear, restoreLook, signOut, exitDemo, setRoute, setDate, setMonth, openSheet, closeSheet, clearToast, flush, note, armToast
 } from './store.js';
 
 const app = document.getElementById('app');
@@ -215,6 +215,8 @@ document.body.addEventListener('click', (ev) => {
     return;
   }
   if (act === 'demo') { startDemo(); return; }
+  if (act === 'ask-exit-demo') { openSheet({ type: 'exit-demo' }); return; }
+  if (act === 'confirm-exit-demo') { closeSheet(); exitDemo(); return; }
   if (act === 'google') { readDraft(); connectGoogle(el.dataset.select === '1'); return; }
   if (act === 'signout') { signOut(); return; }
   if (act === 'create') { submitSetup(); return; }
@@ -554,6 +556,8 @@ if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.
 boot().then(() => {
   if (location.hash) onHash();
 });
+
+window.tmState = state;
 
 void flush;
 void daysInMonth;
