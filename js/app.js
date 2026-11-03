@@ -192,6 +192,7 @@ subscribe(() => {
 document.body.addEventListener('click', (ev) => {
   const el = ev.target.closest('[data-act]');
   if (!el) return;
+  if (state.busy) return;
   const act = el.dataset.act;
   if (act === 'go') { go(el.dataset.to, el.dataset.id); return; }
   if (act === 'back') {

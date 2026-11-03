@@ -8,7 +8,7 @@ const DRIVE = 'https://www.googleapis.com/drive/v3';
 const SHEETS = 'https://sheets.googleapis.com/v4/spreadsheets';
 export const APP_MARK = 'tuk-manager';
 
-async function gfetch(token, url, opt = {}) {
+async function gfetch(token, url, opt = {}, attempt = 0) {
   let res;
   try {
     res = await fetch(url, {
@@ -19,6 +19,12 @@ async function gfetch(token, url, opt = {}) {
     const err = new Error('sem rede');
     err.offline = true;
     throw err;
+  }
+  if ((res.status === 429 || res.status === 503) && attempt < 6) {
+    const retryAfter = Number(res.headers.get('retry-after'));
+    const wait = Math.min(8000, (retryAfter > 0 ? retryAfter * 1000 : 400 * 2 ** attempt));
+    await new Promise(r => setTimeout(r, wait));
+    return gfetch(token, url, opt, attempt + 1);
   }
   if (!res.ok) {
     const err = new Error('Google ' + res.status);
@@ -151,7 +157,8 @@ export function formatRequests(ws) {
     const fields = ['userEnteredFormat.textFormat'];
     if (bg) { format.backgroundColor = hexColor(bg); fields.push('userEnteredFormat.backgroundColor'); }
     if (nf) {
-      format.numberFormat = { type: String(nf).includes('%') ? 'PERCENT' : 'NUMBER', pattern: nf };
+      const pattern = String(nf);
+      format.numberFormat = { type: /^0(\.0+)?%$/.test(pattern) ? 'PERCENT' : 'NUMBER', pattern };
       fields.push('userEnteredFormat.numberFormat');
     }
     if (align) {
@@ -205,47 +212,198 @@ async function batch(token, id, requests) {
 }
 
 export async function listFiles(token) {
-  const q = encodeURIComponent(`appProperties has { key='tmApp' and value='${APP_MARK}' } and trashed=false`);
-  const data = await gfetch(token, `${DRIVE}/files?q=${q}&fields=files(id,name,modifiedTime,appProperties)&pageSize=100`);
-  return data.files || [];
+  const files = [];
+  let pageToken = '';
+  const q = encodeURIComponent(`mimeType='application/vnd.google-apps.spreadsheet' and trashed=false`);
+  do {
+    const page = pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : '';
+    const data = await gfetch(token, `${DRIVE}/files?q=${q}&fields=nextPageToken,files(id,name,createdTime,modifiedTime,quotaBytesUsed,appProperties)&pageSize=100${page}`);
+    files.push(...(data.files || []));
+    pageToken = data.nextPageToken || '';
+  } while (pageToken);
+  return files;
 }
 
-export async function createBook(token, model) {
-  const book = fillGids(buildBook(contextFromModel(model)));
-  const title = `${model.businessName} · ${model.year}`;
-  const created = await gfetch(token, SHEETS, {
-    method: 'POST',
-    body: JSON.stringify({
-      properties: { title, locale: 'pt_PT' },
-      sheets: book.sheets.map(ws => ({
-        properties: {
-          sheetId: ws.sheetId,
-          title: ws.title,
-          hidden: !!ws.hidden,
-          tabColor: hexColor(ws.color)
-        }
-      }))
-    })
+function dataScore(file) {
+  const n = Number(file && (file.sheetCount != null ? file.sheetCount : file.quotaBytesUsed));
+  return Number.isFinite(n) ? n : 0;
+}
+
+/** Uma folha por ano. Se houver várias, fica a que tem mais dados; empate, a mais antiga. O id guardado ganha sempre. */
+export function chooseFile(files, { role, year, preferredId, title } = {}) {
+  const yearS = String(year);
+  const usable = (files || []).filter(f => f && f.id && !f.trashed);
+  const tagged = usable.filter(f => {
+    const p = f.appProperties || {};
+    return p.tmApp === APP_MARK && String(p.role || '') === String(role || '') && String(p.year || '') === yearS;
   });
-  const id = created.spreadsheetId;
+  const orphans = String(role) === 'main' ? usable.filter(f => {
+    const p = f.appProperties || {};
+    if (p.tmApp === APP_MARK && p.role) return false;
+    return !!title && f.name === title;
+  }) : [];
+  const pool = tagged.length ? tagged : orphans;
+  if (!pool.length) return null;
+  if (preferredId && pool.some(f => f.id === preferredId)) return pool.find(f => f.id === preferredId);
+  return pool.slice().sort((a, b) => {
+    const d = dataScore(b) - dataScore(a);
+    if (d) return d;
+    return String(a.createdTime || '9999').localeCompare(String(b.createdTime || '9999'));
+  })[0];
+}
+
+export function decideSetup(files, opts) {
+  const file = chooseFile(files, opts);
+  return file ? { action: 'reuse', id: file.id, file } : { action: 'create' };
+}
+
+function sheetUrl(id) {
+  return `https://docs.google.com/spreadsheets/d/${id}/edit`;
+}
+
+function assignGids(book, existingByTitle) {
+  let maxId = 0;
+  for (const id of existingByTitle.values()) maxId = Math.max(maxId, Number(id) || 0);
+  for (const ws of book.sheets) {
+    if (existingByTitle.has(ws.title)) ws.sheetId = existingByTitle.get(ws.title);
+    else { maxId += 1; ws.sheetId = maxId; }
+  }
+  const ids = {};
+  for (const ws of book.sheets) if (ws.ref) ids[ws.ref] = ws.sheetId;
+  for (const ws of book.sheets) bindGids(ws, ws.sheetId, ids);
+  return book;
+}
+
+async function stampFile(token, id, year, ready) {
   await gfetch(token, `${DRIVE}/files/${id}`, {
     method: 'PATCH',
-    body: JSON.stringify({ appProperties: { tmApp: APP_MARK, role: 'main', year: String(model.year) } })
+    body: JSON.stringify({ appProperties: { tmApp: APP_MARK, role: 'main', year: String(year), ready: ready ? '1' : '0' } })
   });
-  const data = [];
-  for (const ws of book.sheets) {
-    data.push({ range: `'${ws.title.replace(/'/g, "''")}'!A1`, majorDimension: 'ROWS', values: gridOf(ws) });
+}
+
+async function driveCreate(token, name, role, year) {
+  return gfetch(token, `${DRIVE}/files`, {
+    method: 'POST',
+    body: JSON.stringify({
+      name,
+      mimeType: 'application/vnd.google-apps.spreadsheet',
+      appProperties: { tmApp: APP_MARK, role, year: String(year), ready: '0' }
+    })
+  });
+}
+
+const DEFAULT_TITLES = new Set(['Sheet1', 'Folha1', 'Folha 1', 'Página1']);
+
+async function hasSchema(token, fileId) {
+  try {
+    const rows = await readRange(token, fileId, `'⚙ Config'!A1:B40`, 'UNFORMATTED_VALUE');
+    return rows.some(row => String((row || [])[0] || '') === 'schema_version' && String((row || [])[1] || '') !== '');
+  } catch (e) {
+    return false;
   }
-  for (let i = 0; i < data.length; i += 8) {
-    await gfetch(token, `${SHEETS}/${id}/values:batchUpdate`, {
+}
+
+async function writeBookValues(token, fileId, book) {
+  const sheets = book.sheets.slice().sort((a, b) => (a.title === '⚙ Config') - (b.title === '⚙ Config'));
+  const data = sheets.map(ws => ({ range: `${qTitle(ws.title)}!A1`, majorDimension: 'ROWS', values: gridOf(ws) }));
+  for (let i = 0; i < data.length; i += 3) {
+    await gfetch(token, `${SHEETS}/${fileId}/values:batchUpdate`, {
       method: 'POST',
-      body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: data.slice(i, i + 8) })
+      body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: data.slice(i, i + 3) })
     });
   }
+}
+
+async function clearDecorations(token, fileId) {
+  const meta = await gfetch(token, `${SHEETS}/${fileId}?fields=sheets(properties(sheetId),protectedRanges(protectedRangeId),conditionalFormats)`);
+  const req = [];
+  for (const s of meta.sheets || []) {
+    for (const pr of s.protectedRanges || []) {
+      if (pr.protectedRangeId != null) req.push({ deleteProtectedRange: { protectedRangeId: pr.protectedRangeId } });
+    }
+    const rules = (s.conditionalFormats || []).length;
+    for (let i = rules - 1; i >= 0; i--) req.push({ deleteConditionalFormatRule: { sheetId: s.properties.sheetId, index: i } });
+  }
+  if (req.length) await batch(token, fileId, req);
+}
+
+async function batchLoose(token, id, requests) {
+  const run = async (list) => {
+    if (!list.length) return;
+    try {
+      await gfetch(token, `${SHEETS}/${id}:batchUpdate`, { method: 'POST', body: JSON.stringify({ requests: list }) });
+    } catch (e) {
+      if (e.status === 400 && list.length > 1) {
+        const mid = Math.ceil(list.length / 2);
+        await run(list.slice(0, mid));
+        await run(list.slice(mid));
+        return;
+      }
+      if (e.status === 400) return;
+      throw e;
+    }
+  };
+  for (let i = 0; i < requests.length; i += 40) await run(requests.slice(i, i + 40));
+}
+
+async function ensureBook(token, fileId, model) {
+  const title = `${model.businessName} · ${model.year}`;
+  const meta = await gfetch(token, `${SHEETS}/${fileId}?fields=properties(locale,title),sheets.properties(sheetId,title)`);
+  const existing = new Map();
+  for (const s of meta.sheets || []) existing.set(s.properties.title, s.properties.sheetId);
+  const book = assignGids(buildBook(contextFromModel(model)), existing);
+  const requests = [];
+  if (!meta.properties || meta.properties.locale !== 'pt_PT' || meta.properties.title !== title) {
+    requests.push({ updateSpreadsheetProperties: { properties: { title, locale: 'pt_PT' }, fields: 'title,locale' } });
+  }
+  for (const ws of book.sheets) {
+    if (existing.has(ws.title)) {
+      requests.push({ updateSheetProperties: { properties: { sheetId: ws.sheetId, hidden: !!ws.hidden, tabColor: hexColor(ws.color) }, fields: 'hidden,tabColor' } });
+    } else {
+      requests.push({ addSheet: { properties: { sheetId: ws.sheetId, title: ws.title, hidden: !!ws.hidden, tabColor: hexColor(ws.color) } } });
+    }
+  }
+  if (requests.length) await batch(token, fileId, requests);
+  const defaults = [];
+  for (const [name, id] of existing) {
+    if (DEFAULT_TITLES.has(name)) defaults.push({ deleteSheet: { sheetId: id } });
+  }
+  if (defaults.length) {
+    try { await batch(token, fileId, defaults); } catch (e) { /* a folha de origem pode ser a única */ }
+  }
+  const schema = await hasSchema(token, fileId);
+  if (!schema) await writeBookValues(token, fileId, book);
+  await clearDecorations(token, fileId);
   let formats = [];
   for (const ws of book.sheets) formats = formats.concat(formatRequests(ws));
-  await batch(token, id, formats);
-  return { id, name: title, url: `https://docs.google.com/spreadsheets/d/${id}/edit` };
+  await batchLoose(token, fileId, formats);
+  return { id: fileId, name: title, url: sheetUrl(fileId) };
+}
+
+export async function createBook(token, model, preferredId) {
+  const year = model.year;
+  const title = `${model.businessName} · ${year}`;
+  const files = await listFiles(token);
+  let chosen = chooseFile(files, { role: 'main', year, preferredId, title });
+  if (!chosen) {
+    await driveCreate(token, title, 'main', year);
+    const again = await listFiles(token);
+    chosen = chooseFile(again, { role: 'main', year, preferredId, title });
+  }
+  if (!chosen) throw new Error('sem folha');
+  try {
+    if ((chosen.appProperties || {}).ready === '1' && (chosen.appProperties || {}).role === 'main') {
+      return { id: chosen.id, name: chosen.name || title, url: sheetUrl(chosen.id) };
+    }
+    await stampFile(token, chosen.id, year, false);
+    const done = await ensureBook(token, chosen.id, model);
+    await stampFile(token, chosen.id, year, true);
+    return done;
+  } catch (e) {
+    e.fileId = chosen.id;
+    e.fileName = chosen.name || title;
+    throw e;
+  }
 }
 
 function cell(grid, r, c) {
@@ -723,11 +881,14 @@ export async function readKeys(token, spreadsheetId, sheetTitle) {
 }
 
 export async function backupFile(token, file) {
+  const files = await listFiles(token);
+  const existing = chooseFile(files, { role: 'backup', year: file.year });
+  if (existing) return existing.id;
   const copy = await gfetch(token, `${DRIVE}/files/${file.id}/copy`, {
     method: 'POST',
     body: JSON.stringify({
       name: `${file.name} (cópia)`,
-      appProperties: { tmApp: APP_MARK, role: 'backup', year: String(file.year) }
+      appProperties: { tmApp: APP_MARK, role: 'backup', year: String(file.year), ready: '1' }
     })
   });
   return copy.id;
