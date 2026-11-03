@@ -160,7 +160,7 @@ function setup(s) {
       <div class="field"><label>Motorista</label><input id="driver" placeholder="Nome" autocomplete="name" value="${escapeHtml(d.driver || '')}"></div>
       <div class="set-row" style="padding:4px 0 2px;border:0"><div class="sm"><b>Sou eu, o patrão</b><span>Sem percentagem nem entregas</span></div><button type="button" class="sw ${owner ? 'on' : ''}" id="owner-sw" data-act="owner-sw" aria-pressed="${owner}"></button></div>
     </section>
-    ${s.setupError ? `<section class="card"><div class="card-h"><div class="card-ic" style="background:#fde8e4;color:#7d2416">${I.alert}</div><div class="card-t"><div class="card-title">A folha não ficou pronta</div><div class="card-sub">${escapeHtml(s.setupError)}</div></div></div></section>` : ''}
+    ${s.setupError ? `<section class="card"><div class="card-h"><div class="card-ic" style="background:#fde8e4;color:#7d2416">${I.alert}</div><div class="card-t"><div class="card-title">A folha não ficou pronta</div><div class="card-sub setup-reason">${escapeHtml(s.setupError)}</div></div></div></section>` : ''}
     <button type="button" class="btn btn-gold btn-block" data-act="create" ${s.busy ? 'disabled' : ''}>${s.setupError ? 'Tentar outra vez' : `Criar a folha de ${year} e começar`}</button>
     <p style="font-size:12.5px;margin:12px 0 0">A app cria a folha «<span id="file-name">${escapeHtml(d.business || 'o teu negócio')}</span> · ${year}» na tua Drive.</p>
     <button type="button" class="link-demo" data-act="demo">Experimentar com dados de demonstração</button>

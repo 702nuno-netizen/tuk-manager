@@ -8,18 +8,163 @@ export function backoffMs(attempt, retryAfterSec) {
   return Math.min(20000, 500 * 2 ** Math.max(0, attempt));
 }
 
+export function googleMessage(body) {
+  const raw = String(body || '').trim();
+  if (!raw) return '';
+  try {
+    const j = JSON.parse(raw);
+    const msg = j && j.error && j.error.message;
+    if (msg) return String(msg).trim();
+  } catch (e) { /* texto simples */ }
+  return raw.replace(/\s+/g, ' ').trim();
+}
+
 export function explainError(e) {
   if (!e || e.offline) return 'sem ligação';
   const status = Number(e.status) || 0;
   if (status === 429) return 'limite do Google (429)';
   if (status >= 500) return 'o Google não respondeu (' + status + ')';
   if (status === 401 || status === 403) return 'a sessão Google expirou';
-  if (status === 400) {
-    const bit = String(e.body || '').replace(/\s+/g, ' ').trim().slice(0, 90);
-    return bit ? 'pedido recusado: ' + bit : 'pedido recusado (400)';
-  }
+  const msg = googleMessage(e.body);
+  if (status === 400) return msg || 'pedido recusado (400)';
+  if (msg) return msg;
   if (status) return 'erro do Google (' + status + ')';
   return 'sem ligação';
+}
+
+/** Parte um retângulo nas fronteiras do congelamento e das linhas/colunas ocultas. */
+export function legalMerges(merges, opt = {}) {
+  const frozenRows = Number(opt.frozenRows) || 0;
+  const frozenCols = Number(opt.frozenCols) || 0;
+  const cuts = [];
+  if (frozenRows > 0) cuts.push(['row', frozenRows + 1]);
+  if (frozenCols > 0) cuts.push(['col', frozenCols + 1]);
+  for (const r of opt.hiddenRows || []) {
+    cuts.push(['row', Number(r)]);
+    cuts.push(['row', Number(r) + 1]);
+  }
+  for (const c of opt.hiddenCols || []) {
+    const n = typeof c === 'number' ? c : colNum(c);
+    cuts.push(['col', n]);
+    cuts.push(['col', n + 1]);
+  }
+  let rects = (merges || []).map(m => [m[0], m[1], m[2], m[3]]);
+  for (const [axis, boundary] of cuts) rects = splitAt(rects, axis, boundary);
+  rects = rects.filter(span);
+  const kept = [];
+  for (const rect of rects) {
+    if (kept.some(k => overlaps(k, rect))) continue;
+    kept.push(rect);
+  }
+  return kept;
+}
+
+function colNum(letter) {
+  let n = 0;
+  for (const ch of String(letter)) n = n * 26 + (ch.charCodeAt(0) - 64);
+  return n;
+}
+
+function span([r1, c1, r2, c2]) {
+  return r2 > r1 || c2 > c1;
+}
+
+function splitAt(rects, axis, boundary) {
+  if (!(boundary > 1)) return rects;
+  const out = [];
+  for (const rect of rects) {
+    const [r1, c1, r2, c2] = rect;
+    const start = axis === 'row' ? r1 : c1;
+    const end = axis === 'row' ? r2 : c2;
+    if (start < boundary && end >= boundary) {
+      if (axis === 'row') {
+        out.push([r1, c1, boundary - 1, c2]);
+        out.push([boundary, c1, r2, c2]);
+      } else {
+        out.push([r1, c1, r2, boundary - 1]);
+        out.push([r1, boundary, r2, c2]);
+      }
+    } else out.push(rect);
+  }
+  return out.filter(r => r[2] >= r[0] && r[3] >= r[1]);
+}
+
+function overlaps(a, b) {
+  return a[0] <= b[2] && b[0] <= a[2] && a[1] <= b[3] && b[1] <= a[3];
+}
+
+function rangeOk(range) {
+  if (!range) return false;
+  const { startRowIndex, endRowIndex, startColumnIndex, endColumnIndex } = range;
+  return startRowIndex >= 0 && endRowIndex > startRowIndex && startColumnIndex >= 0 && endColumnIndex > startColumnIndex;
+}
+
+export function auditRequests(ws, requests) {
+  const faults = [];
+  const m = /^([A-Z]+)(\d+)$/.exec(ws.freeze || '');
+  const frozenRows = m ? Math.max(0, Number(m[2]) - 1) : 0;
+  let frozenCols = 0;
+  if (m) {
+    let n = 0;
+    for (const ch of m[1]) n = n * 26 + (ch.charCodeAt(0) - 64);
+    frozenCols = n - 1;
+  }
+  const merges = [];
+  requests.forEach((req, i) => {
+    if (req.mergeCells) {
+      const range = req.mergeCells.range;
+      if (!rangeOk(range)) faults.push('união sem intervalo');
+      const prev = requests[i - 1];
+      const same = prev && prev.unmergeCells && JSON.stringify(prev.unmergeCells.range) === JSON.stringify(range);
+      if (!same) faults.push('união sem desunir antes');
+      merges.push([
+        range.startRowIndex + 1,
+        range.startColumnIndex + 1,
+        range.endRowIndex,
+        range.endColumnIndex
+      ]);
+    }
+    const dim = req.updateDimensionProperties;
+    if (dim) {
+      const r = dim.range;
+      if (!r || r.startIndex < 0 || r.endIndex <= r.startIndex) faults.push('dimensão inválida');
+    }
+    const rep = req.repeatCell && req.repeatCell.range;
+    if (req.repeatCell && !rangeOk(rep)) faults.push('pintura sem intervalo');
+    if (req.addProtectedRange && !rangeOk(req.addProtectedRange.protectedRange && req.addProtectedRange.protectedRange.range)) faults.push('proteção sem intervalo');
+    if (req.addConditionalFormatRule) {
+      const rule = req.addConditionalFormatRule.rule;
+      const cond = rule && rule.booleanRule && rule.booleanRule.condition;
+      if (!cond || !cond.values || !cond.values[0] || !cond.values[0].userEnteredValue) faults.push('formato condicional sem fórmula');
+      if (!rule.ranges || !rule.ranges.length || !rangeOk(rule.ranges[0])) faults.push('formato condicional sem intervalo');
+    }
+    if (req.setDataValidation && !rangeOk(req.setDataValidation.range)) faults.push('validação sem intervalo');
+    const sheetId = (req.mergeCells && req.mergeCells.range.sheetId)
+      || (req.repeatCell && req.repeatCell.range.sheetId)
+      || (req.updateSheetProperties && req.updateSheetProperties.properties.sheetId);
+    if (sheetId != null && typeof sheetId !== 'number') faults.push('sheetId inválido');
+  });
+  return faults.concat(mergeFaults(merges, {
+    frozenRows, frozenCols, hiddenRows: ws.hideRow, hiddenCols: ws.hideCol
+  }));
+}
+
+export function mergeFaults(merges, opt = {}) {
+  const frozenRows = Number(opt.frozenRows) || 0;
+  const frozenCols = Number(opt.frozenCols) || 0;
+  const hiddenRows = new Set(opt.hiddenRows || []);
+  const hiddenCols = new Set((opt.hiddenCols || []).map(c => typeof c === 'number' ? c : colNum(c)));
+  const faults = [];
+  merges.forEach((m, i) => {
+    const [r1, c1, r2, c2] = m;
+    if (!(r2 > r1 || c2 > c1)) faults.push('união ' + i + ' é uma só célula');
+    if (frozenRows > 0 && r1 <= frozenRows && r2 > frozenRows) faults.push('união ' + i + ' cruza as linhas congeladas');
+    if (frozenCols > 0 && c1 <= frozenCols && c2 > frozenCols) faults.push('união ' + i + ' cruza as colunas congeladas');
+    for (const hr of hiddenRows) if (r1 <= hr && r2 > hr) faults.push('união ' + i + ' cruza a linha oculta ' + hr);
+    for (const hc of hiddenCols) if (c1 <= hc && c2 > hc) faults.push('união ' + i + ' cruza a coluna oculta ' + hc);
+    for (let j = 0; j < i; j++) if (overlaps(merges[j], m)) faults.push('união ' + i + ' sobrepõe a união ' + j);
+  });
+  return faults;
 }
 
 export function progressText(index, total, label) {

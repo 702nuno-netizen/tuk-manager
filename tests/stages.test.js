@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildBook } from '../js/sheet.js';
-import { decideSetup } from '../js/remote.js';
+import { decideSetup, formatRequests } from '../js/remote.js';
 import {
-  STEP_GAP_MS, explainError, orderSheets, planRun, progressText, reconcileIndex, runStages, stepLabel
+  STEP_GAP_MS, auditRequests, explainError, orderSheets, planRun, progressText, reconcileIndex, runStages, stepLabel
 } from '../js/stages.js';
 
 function book() {
@@ -58,6 +58,17 @@ test('a retoma salta os separadores prontos e espera entre os outros', async () 
   assert.equal(planRun(steps, 2).pending.length, 2);
 });
 
+test('nenhuma união cruza o congelamento, a linha 1 ou a coluna A', () => {
+  const sheets = book().sheets;
+  assert.ok(sheets.some(s => s.title === '⚙ Modelo motorista'));
+  assert.ok(sheets.some(s => s.title === '⚙ Modelo tuk'));
+  for (const ws of sheets) {
+    ws.sheetId = 3;
+    const faults = auditRequests(ws, formatRequests(ws));
+    assert.deepEqual(faults, [], ws.title + ': ' + faults.join(' | '));
+  }
+});
+
 test('não se cria uma segunda folha e o erro explica a causa', () => {
   const files = [{
     id: 'folha-1',
@@ -79,5 +90,7 @@ test('não se cria uma segunda folha e o erro explica a causa', () => {
   assert.equal(creates, 0);
   assert.equal(explainError({ offline: true }), 'sem ligação');
   assert.equal(explainError({ status: 429 }), 'limite do Google (429)');
-  assert.match(explainError({ status: 400, body: 'Invalid requests[0].addSheet' }), /pedido recusado/);
+  const full = 'Não é possível unir células congeladas e não congeladas neste intervalo longo que não pode ser cortado.';
+  const body = JSON.stringify({ error: { code: 400, message: full } });
+  assert.equal(explainError({ status: 400, body }), full);
 });
