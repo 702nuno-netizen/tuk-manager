@@ -11,6 +11,7 @@ button.sw{padding:0}
 .loading-card .bar{margin-top:14px}
 .demo-bar{position:sticky;top:0;z-index:25;display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0;padding:10px 14px;background:#fff6e8;color:#7a5a12;font-weight:700;font-size:13.5px}
 .demo-bar button{background:#0b2142;color:#fff;border-radius:999px;padding:7px 14px;font-weight:700;font-size:13px}
+.setup-reason{white-space:normal;overflow-wrap:anywhere}
 .spin{width:36px;height:36px;margin:0 auto;border-radius:50%;border:3px solid #e4edf9;border-top-color:#d4a537;animation:spin .8s linear infinite}
 .sync-note .spin{width:16px;height:16px;border-width:2px;margin:0;flex:none}
 .sync-note .link-btn{padding:6px 0;white-space:nowrap}

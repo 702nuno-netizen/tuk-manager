@@ -4,7 +4,7 @@ import { cellFromParts, partsFromCell, round2, rowKey } from './format.js';
 import { blankYear, ensureRecurring } from './model.js';
 import { buildBook, colLetter, contextFromModel, keyIndex } from './sheet.js';
 import {
-  STEP_GAP_MS, backoffMs, explainError, formatIdMap, orderSheets, parseIdMap, progressText,
+  STEP_GAP_MS, backoffMs, explainError, formatIdMap, legalMerges, orderSheets, parseIdMap, progressText,
   reconcileIndex, runStages, stepLabel
 } from './stages.js';
 
@@ -41,7 +41,7 @@ async function gfetch(token, url, opt = {}, attempt = 0) {
   if (!res.ok) {
     const err = new Error('Google ' + res.status);
     err.status = res.status;
-    err.body = (await res.text()).slice(0, 400);
+    err.body = (await res.text()).slice(0, 4000);
     err.reason = explainError(err);
     console.warn('[folha]', res.status, String(url).slice(0, 120), err.body);
     throw err;
@@ -137,8 +137,16 @@ export function formatRequests(ws) {
   for (const run of runs(ws.hideRow)) {
     req.push({ updateDimensionProperties: { range: { sheetId: id, dimension: 'ROWS', startIndex: run.start - 1, endIndex: run.end }, properties: { hiddenByUser: true }, fields: 'hiddenByUser' } });
   }
-  for (const [r1, c1, r2, c2] of ws.merges) {
-    req.push({ mergeCells: { range: { sheetId: id, startRowIndex: r1 - 1, endRowIndex: r2, startColumnIndex: c1 - 1, endColumnIndex: c2 }, mergeType: 'MERGE_ALL' } });
+  const merges = legalMerges(ws.merges, {
+    frozenRows: fr ? fr.frozenRowCount : 0,
+    frozenCols: fr ? fr.frozenColumnCount : 0,
+    hiddenRows: ws.hideRow,
+    hiddenCols: ws.hideCol
+  });
+  for (const [r1, c1, r2, c2] of merges) {
+    const range = { sheetId: id, startRowIndex: r1 - 1, endRowIndex: r2, startColumnIndex: c1 - 1, endColumnIndex: c2 };
+    req.push({ unmergeCells: { range } });
+    req.push({ mergeCells: { range, mergeType: 'MERGE_ALL' } });
   }
   for (const [row, h] of Object.entries(ws.rowH || {})) {
     const r = Number(row);
@@ -413,7 +421,11 @@ async function writeOneSheet(token, fileId, ws, existing) {
       body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: [band] })
     });
   }
-  await sendRequests(token, fileId, formatRequests(ws), 10);
+  const painted = formatRequests(ws);
+  const merges = painted.filter(r => r.mergeCells || r.unmergeCells);
+  const rest = painted.filter(r => !r.mergeCells && !r.unmergeCells);
+  await sendRequests(token, fileId, rest, 10);
+  await sendRequests(token, fileId, merges, 2);
 }
 
 async function noteProgress(token, fileId, index, idMap) {
