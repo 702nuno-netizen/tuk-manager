@@ -1,6 +1,6 @@
 /* Drive e Sheets a partir do browser. Lê e escreve pela chave, não pela posição. */
 
-import { cellFromParts, partsFromCell, round2 } from './format.js';
+import { cellFromParts, partsFromCell, round2, rowKey } from './format.js';
 import { blankYear, ensureRecurring } from './model.js';
 import { buildBook, colLetter, contextFromModel, keyIndex } from './sheet.js';
 
@@ -98,7 +98,7 @@ function gridOf(ws) {
   return rows;
 }
 
-function formatRequests(ws) {
+export function formatRequests(ws) {
   const req = [];
   const id = ws.sheetId;
   const fr = freezeOf(ws.freeze);
@@ -120,29 +120,64 @@ function formatRequests(ws) {
   for (const [r1, c1, r2, c2] of ws.merges) {
     req.push({ mergeCells: { range: { sheetId: id, startRowIndex: r1 - 1, endRowIndex: r2, startColumnIndex: c1 - 1, endColumnIndex: c2 }, mergeType: 'MERGE_ALL' } });
   }
+  for (const [row, h] of Object.entries(ws.rowH || {})) {
+    const r = Number(row);
+    req.push({ updateDimensionProperties: { range: { sheetId: id, dimension: 'ROWS', startIndex: r - 1, endIndex: r }, properties: { pixelSize: Math.round(Number(h) * 1.3) }, fields: 'pixelSize' } });
+  }
   const painted = new Map();
   for (const c of ws.cells) {
-    if (!c.bg && !c.nf && !c.bold && !c.color) continue;
-    const sig = [c.bg || '', c.nf || '', c.bold ? 1 : 0, c.color || '', c.align || ''].join('|');
+    if (!c.bg && !c.nf && !c.bold && !c.color && !c.border && !c.size) continue;
+    const sig = JSON.stringify([c.bg || '', c.nf || '', c.bold ? 1 : 0, c.italic ? 1 : 0, c.color || '', c.align || '', c.size || 10, c.wrap ? 1 : 0, c.border ? 1 : 0, c.bg === 'FFF9E5' ? 1 : 0]);
     if (!painted.has(sig)) painted.set(sig, []);
     painted.get(sig).push(c);
   }
   for (const [sig, cells] of painted) {
-    const [bg, nf, bold, color, align] = sig.split('|');
+    const [bg, nf, bold, italic, color, align, size, wrap, border, inputBorder] = JSON.parse(sig);
     const byCol = new Map();
     for (const c of cells) {
       if (!byCol.has(c.c)) byCol.set(c.c, []);
       byCol.get(c.c).push(c.r);
     }
-    const format = { textFormat: { fontFamily: 'Arial', fontSize: 10, bold: bold === '1', foregroundColor: color ? hexColor(color) : { red: 0, green: 0, blue: 0 } } };
-    if (bg) format.backgroundColor = hexColor(bg);
-    if (nf) format.numberFormat = { type: nf.includes('%') ? 'PERCENT' : 'NUMBER', pattern: nf };
-    if (align) format.horizontalAlignment = align === 'center' ? 'CENTER' : align === 'right' ? 'RIGHT' : 'LEFT';
+    const format = {
+      textFormat: {
+        fontFamily: 'Arial',
+        fontSize: Number(size) || 10,
+        bold: bold === 1,
+        italic: italic === 1,
+        foregroundColor: color ? hexColor(color) : { red: 0, green: 0, blue: 0 }
+      }
+    };
+    if (wrap === 1) format.wrapStrategy = 'WRAP';
+    const fields = ['userEnteredFormat.textFormat'];
+    if (bg) { format.backgroundColor = hexColor(bg); fields.push('userEnteredFormat.backgroundColor'); }
+    if (nf) {
+      format.numberFormat = { type: String(nf).includes('%') ? 'PERCENT' : 'NUMBER', pattern: nf };
+      fields.push('userEnteredFormat.numberFormat');
+    }
+    if (align) {
+      format.horizontalAlignment = align === 'center' ? 'CENTER' : align === 'right' ? 'RIGHT' : 'LEFT';
+      fields.push('userEnteredFormat.horizontalAlignment');
+    }
+    if (wrap === 1) fields.push('userEnteredFormat.wrapStrategy');
+    if (border || inputBorder) {
+      const edge = hexColor(inputBorder ? 'E0B000' : 'BFBFBF');
+      const side = { style: 'SOLID', color: edge };
+      format.borders = { top: side, bottom: side, left: side, right: side };
+      fields.push('userEnteredFormat.borders');
+    }
     for (const [col, rows] of byCol) {
       for (const run of runs(rows)) {
-        req.push({ repeatCell: { range: { sheetId: id, startRowIndex: run.start - 1, endRowIndex: run.end, startColumnIndex: col - 1, endColumnIndex: col }, cell: { userEnteredFormat: format }, fields: 'userEnteredFormat(backgroundColor,textFormat,numberFormat,horizontalAlignment)' } });
+        req.push({ repeatCell: { range: { sheetId: id, startRowIndex: run.start - 1, endRowIndex: run.end, startColumnIndex: col - 1, endColumnIndex: col }, cell: { userEnteredFormat: format }, fields: fields.join(',') } });
       }
     }
+  }
+  for (const rule of ws.cf || []) {
+    const range = parseA1(id, rule.range);
+    if (!range) continue;
+    const format = {};
+    if (rule.bg) format.backgroundColor = hexColor(rule.bg);
+    if (rule.color || rule.bold || rule.italic) format.textFormat = { bold: !!rule.bold, italic: !!rule.italic, foregroundColor: rule.color ? hexColor(rule.color) : undefined };
+    req.push({ addConditionalFormatRule: { rule: { ranges: [range], booleanRule: { condition: { type: 'CUSTOM_FORMULA', values: [{ userEnteredValue: rule.formula }] }, format } }, index: 0 } });
   }
   for (const a1 of ws.protect) {
     const range = parseA1(id, a1);
@@ -223,7 +258,10 @@ function indexGrid(grid) {
   const rows = {};
   const head = grid[0] || [];
   head.forEach((v, i) => { if (v) cols[String(v)] = i + 1; });
-  grid.forEach((row, i) => { if (row && row[0]) rows[String(row[0])] = i + 1; });
+  grid.forEach((row, i) => {
+    if (!row || row[0] == null || row[0] === '') return;
+    rows[rowKey(row[0])] = i + 1;
+  });
   return { cols, rows };
 }
 
@@ -455,7 +493,7 @@ function indexFromCells(ws) {
   const rows = {};
   for (const c of ws.cells) {
     if (c.r === 1 && c.c > 1 && c.v) cols[String(c.v)] = c.c;
-    if (c.c === 1 && c.r > 1 && c.v) rows[String(c.v)] = c.r;
+    if (c.c === 1 && c.r > 1 && c.v) rows[rowKey(c.v)] = c.r;
   }
   return { cols, rows };
 }
@@ -502,6 +540,137 @@ export async function repaintBook(token, fileId, model) {
   return { missing: [] };
 }
 
+export function cellSame(current, base) {
+  const na = current == null || current === '' ? '' : String(current);
+  const nb = base == null || base === '' ? '' : String(base);
+  if (na === nb) return true;
+  if ((na === '' || na === '0') && (nb === '' || nb === '0')) return true;
+  const fa = Number(na.replace(',', '.'));
+  const fb = Number(nb.replace(',', '.'));
+  return na !== '' && nb !== '' && Number.isFinite(fa) && Number.isFinite(fb) && fa === fb;
+}
+
+function bindGids(ws, selfId, map) {
+  for (const c of ws.cells) {
+    if (typeof c.v === 'string' && c.v.includes('{{gid:')) {
+      c.v = c.v.replace(/\{\{gid:([^}]+)\}\}/g, (_, k) => String(k === 'self' ? selfId : (map[k] || 0)));
+    }
+  }
+}
+
+function qTitle(title) {
+  return `'${String(title).replace(/'/g, "''")}'`;
+}
+
+export async function pushRoster(token, fileId, model) {
+  const meta = await gfetch(token, `${SHEETS}/${fileId}?fields=sheets.properties(sheetId,title)`);
+  const byTitle = {};
+  let maxId = 0;
+  for (const s of meta.sheets || []) {
+    byTitle[s.properties.title] = s.properties.sheetId;
+    maxId = Math.max(maxId, s.properties.sheetId || 0);
+  }
+  const idByRef = { painel: byTitle['📊 Painel'] || 0 };
+  for (const d of model.drivers) if (d.sheetId) idByRef[d.id] = d.sheetId;
+  for (const t of model.tuks) if (t.sheetId) idByRef[t.id] = t.sheetId;
+  let added = false;
+  const book = buildBook(contextFromModel(model));
+  for (const ws of book.sheets) {
+    if (ws.role !== 'motorista' && ws.role !== 'tuk') continue;
+    if (byTitle[ws.title]) {
+      const ent = (ws.role === 'motorista' ? model.drivers : model.tuks).find(x => x.id === ws.ref);
+      if (ent) { ent.sheetId = byTitle[ws.title]; ent.sheetTitle = ws.title; idByRef[ws.ref] = byTitle[ws.title]; }
+      continue;
+    }
+    maxId += 1;
+    ws.sheetId = maxId;
+    bindGids(ws, ws.sheetId, idByRef);
+    idByRef[ws.ref] = ws.sheetId;
+    byTitle[ws.title] = ws.sheetId;
+    await batch(token, fileId, [{ addSheet: { properties: { sheetId: ws.sheetId, title: ws.title, hidden: false, tabColor: hexColor(ws.color) } } }]);
+    await gfetch(token, `${SHEETS}/${fileId}/values:batchUpdate`, {
+      method: 'POST',
+      body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: [{ range: `${qTitle(ws.title)}!A1`, majorDimension: 'ROWS', values: gridOf(ws) }] })
+    });
+    await batch(token, fileId, formatRequests(ws));
+    const ent = (ws.role === 'motorista' ? model.drivers : model.tuks).find(x => x.id === ws.ref);
+    if (ent) { ent.sheetId = ws.sheetId; ent.sheetTitle = ws.title; }
+    added = true;
+  }
+  const mot = await readRange(token, fileId, `'⚙ Motoristas'!A2:A60`, 'UNFORMATTED_VALUE');
+  const tukCol = await readRange(token, fileId, `'⚙ Tuks'!A2:A60`, 'UNFORMATTED_VALUE');
+  const writes = [];
+  const place = (grid, id, start) => {
+    for (let i = 0; i < grid.length; i++) if (String((grid[i] || [])[0] || '') === id) return start + i;
+    for (let i = 0; i < 50; i++) if (!grid[i] || !grid[i][0]) return start + i;
+    return start;
+  };
+  model.drivers.forEach((d) => {
+    const row = place(mot, d.id, 2);
+    const title = d.sheetTitle || '';
+    const vals = [d.id, d.name, title, d.sheetId || '', d.phone || '', d.since || ''];
+    writes.push({ range: `'⚙ Motoristas'!A${row}:F${row}`, values: [vals] });
+    writes.push({ range: `'⚙ Motoristas'!H${row}:I${row}`, values: [[d.active === false ? 'inativo' : 'ativo', d.opening || 0]] });
+    if (d.sheetId) writes.push({ range: `'👥 Motoristas'!F${row + 2}`, values: [[`=HYPERLINK("#gid=${d.sheetId}";"abrir →")`]] });
+  });
+  model.tuks.forEach((t) => {
+    const row = place(tukCol, t.id, 2);
+    writes.push({ range: `'⚙ Tuks'!A${row}`, values: [[t.id]] });
+    writes.push({ range: `'⚙ Tuks'!C${row}:F${row}`, values: [[t.sheetTitle || '', t.sheetId || '', t.nickname || '', t.fuel || '']] });
+    writes.push({ range: `'⚙ Tuks'!H${row}:K${row}`, values: [[t.status || 'ativo', t.soldOn || '', t.number, t.plate || '']] });
+  });
+  const pctRows = (model.pct || []).map(p => [p.driverId, (model.drivers.find(d => d.id === p.driverId) || {}).name || '', p.from, p.pct, p.role, '']);
+  while (pctRows.length < 30) pctRows.push(['', '', '', '', '', '']);
+  writes.push({ range: `'⚙ Percentagens'!A2:F31`, values: pctRows });
+  const typeRows = (model.types || []).map(t => [t.id, t.name, t.freq, t.repeat ? 'sim' : 'não', t.scope === 'combustão' ? 'só tuks a combustão' : 'todos os tuks', t.active === false ? 'inativo' : 'ativo', '', '']);
+  while (typeRows.length < 20) typeRows.push(['', '', '', '', '', '', '', '']);
+  writes.push({ range: `'⚙ Tipos de gasto'!A2:H21`, values: typeRows });
+  const fixRows = (model.fixed || []).map(f => [f.typeId, '', f.tukId, '', f.from, f.amount, f.note || '']);
+  while (fixRows.length < 40) fixRows.push(['', '', '', '', '', '', '']);
+  writes.push({ range: `'⚙ Gastos fixos'!A2:G41`, values: fixRows });
+  const preRows = (model.prizes || []).map(p => [p.from, p.active ? 'SIM' : 'NÃO', p.amount, 'faturado do motorista no mês ≥ objetivo do mês', '']);
+  while (preRows.length < 20) preRows.push(['', '', '', '', '']);
+  writes.push({ range: `'⚙ Prémio'!A2:E21`, values: preRows });
+  const objs = (model.objectives || []).map(o => [o.amount || 0]);
+  writes.push({ range: `'📊 Painel'!J10:J21`, values: objs });
+  const cfg = await readRange(token, fileId, `'⚙ Config'!A1:A40`, 'UNFORMATTED_VALUE');
+  cfg.forEach((row, i) => {
+    const key = String((row || [])[0] || '');
+    if (key === 'negocio') writes.push({ range: `'⚙ Config'!B${i + 1}`, values: [[model.businessName || '']] });
+    if (key === 'gratificacoes_ativas') writes.push({ range: `'⚙ Config'!B${i + 1}`, values: [[model.tipsEnabled ? 'SIM' : 'NÃO']] });
+  });
+  if (added) {
+    const cons = book.sheets.find(s => s.role === 'consolidado');
+    if (cons) {
+      for (const c of cons.cells) {
+        if (typeof c.v === 'string' && c.v.startsWith('=')) {
+          writes.push({ range: `'⚙ Consolidado'!${colLetter(c.c)}${c.r}`, values: [[c.v]] });
+        }
+      }
+    }
+  }
+  for (let i = 0; i < writes.length; i += 40) {
+    await gfetch(token, `${SHEETS}/${fileId}/values:batchUpdate`, {
+      method: 'POST',
+      body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: writes.slice(i, i + 40) })
+    });
+  }
+  return { added };
+}
+
+export async function appendLog(token, fileId, lines) {
+  if (!lines.length) return;
+  const col = await readRange(token, fileId, `'⚙ Registo'!A1:A400`, 'FORMULA');
+  const start = Math.max(2, col.length + 1);
+  await gfetch(token, `${SHEETS}/${fileId}/values:batchUpdate`, {
+    method: 'POST',
+    body: JSON.stringify({
+      valueInputOption: 'USER_ENTERED',
+      data: [{ range: `'⚙ Registo'!A${start}:H${start + lines.length - 1}`, values: lines }]
+    })
+  });
+}
+
 export async function writeCells(token, spreadsheetId, jobs) {
   if (!jobs.length) return { conflicts: [] };
   const ranges = jobs.map(j => j.a1);
@@ -512,8 +681,7 @@ export async function writeCells(token, spreadsheetId, jobs) {
   (data.valueRanges || []).forEach((vr, i) => {
     const current = vr.values && vr.values[0] ? vr.values[0][0] : '';
     const base = jobs[i].baseline == null ? '' : jobs[i].baseline;
-    const norm = (v) => v == null || v === '' ? '' : String(v);
-    if (norm(current) !== norm(base)) conflicts.push({ ...jobs[i], current });
+    if (!cellSame(current, base)) conflicts.push({ ...jobs[i], current });
     else updates.push({ range: jobs[i].a1, values: [[jobs[i].value == null ? '' : jobs[i].value]] });
   });
   for (let i = 0; i < updates.length; i += 100) {
@@ -523,6 +691,18 @@ export async function writeCells(token, spreadsheetId, jobs) {
     });
   }
   return { conflicts };
+}
+
+export function locateJob(keys, job) {
+  if (!job) return '';
+  const title = `'${String(job.title || '').replace(/'/g, "''")}'`;
+  if (job.direct) return `${title}!${job.direct}`;
+  if (!keys) return '';
+  let col = keys.cols[job.colKey];
+  if (!col && job.colKey === 'valor') col = 4;
+  const row = keys.rows[job.rowKey];
+  if (!col || !row) return '';
+  return `${title}!${colLetter(col)}${row}`;
 }
 
 export function addressOf(sheetTitle, keys, rowKey, colKey) {
@@ -538,7 +718,7 @@ export async function readKeys(token, spreadsheetId, sheetTitle) {
   const cols = {};
   (grid[0] || []).forEach((v, i) => { if (v) cols[String(v)] = i + 1; });
   const rows = {};
-  colA.forEach((row, i) => { if (row && row[0]) rows[String(row[0])] = i + 1; });
+  colA.forEach((row, i) => { if (row && row[0] != null && row[0] !== '') rows[rowKey(row[0])] = i + 1; });
   return { cols, rows };
 }
 

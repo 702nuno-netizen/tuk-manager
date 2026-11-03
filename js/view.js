@@ -6,7 +6,7 @@ import {
 } from './format.js';
 import {
   activeDrivers, dailyTypes, dayCompany, dayRec, driverMonth, isOwnerAt, monthlyAmount,
-  monthlyTypes, monthView, pctAt, prizeAt, saldoAte, sharesOf, suggestFromPrior,
+  monthlyTypes, monthView, pctAt, PCT_START, prizeAt, saldoAte, sharesOf, suggestFromPrior,
   tukMonth, visibleTuks, yearView
 } from './model.js';
 
@@ -97,13 +97,26 @@ function quick(vals, act) {
 function toast(s) {
   const msg = s.toastHtml || (s.toast ? escapeHtml(s.toast) : '');
   if (!msg) return '';
-  return `<div class="toast show ${s.toastErr ? 'err' : ''}"><div class="t-ic">${s.toastErr ? I.alert : I.check}</div><div>${msg}</div></div>`;
+  const on = !!s.toastOn;
+  return `<div class="toast${on ? ' show' : ''}${s.toastErr ? ' err' : ''}"><div class="t-ic">${s.toastErr ? I.alert : I.check}</div><div>${msg}</div></div>`;
+}
+function barGoal(mv, model) {
+  const per = mv.obj > 0 ? mv.obj : 3000;
+  const people = mv.workers > 0 ? mv.workers : Math.max(1, activeDrivers(model).length || 1);
+  const company = Math.round(per * people * 100) / 100;
+  return { per, people, company, pct: company > 0 ? mv.fat / company : 0 };
 }
 function offline(s) {
-  if (!s.offline && !s.pending.length) return '';
+  if (s.mode === 'google' && s.syncError) {
+    const again = s.syncError.indexOf('Entra outra vez') >= 0 ? '<button type="button" class="link-btn" data-act="google">Entrar outra vez</button>' : '';
+    return `<div class="sync-note">${escapeHtml(s.syncError)}${again}</div>`;
+  }
+  if (s.mode === 'google' && s.syncing) return '<div class="sync-note quiet">A gravar na folha…</div>';
+  if (!s.offline && !(s.pending && s.pending.length)) return '';
   if (s.mode !== 'google') return '';
-  const txt = s.offline ? 'Sem rede. O que lançares fica neste telemóvel e segue quando voltares a ter ligação.' : `A gravar ${s.pending.length} alteração${s.pending.length > 1 ? 'ões' : ''}…`;
-  return `<div class="offline-bar">${s.pending.length ? '<i class="pending-dot"></i>' : ''}${escapeHtml(txt)}</div>`;
+  const n = s.pending.length;
+  const txt = s.offline ? 'Sem rede. O que lançares fica neste telemóvel e segue quando voltares a ter ligação.' : `A gravar ${n} alteração${n > 1 ? 'ões' : ''}…`;
+  return `<div class="offline-bar">${n ? '<i class="pending-dot"></i>' : ''}${escapeHtml(txt)}</div>`;
 }
 
 function setup(s) {
@@ -153,7 +166,8 @@ function hoje(s) {
   const day = dayCompany(m, date);
   const pill = date === m.today ? '<span class="today-pill">● Hoje</span>' : '';
   const mv = day.month;
-  const pct = pctInt(mv.pct || 0);
+  const goal = barGoal(mv, m);
+  const pct = pctInt(goal.pct || 0);
   const sem = day.people.filter(p => p.semTuk);
   let alert = '';
   if (sem.length) {
@@ -201,7 +215,7 @@ function hoje(s) {
     return `<button type="button" class="dayrow" data-act="open-tuk" data-id="${t.tuk.id}"><div class="dnum"><div><b>${pad2(t.tuk.number)}</b><small>tuk</small></div></div><div class="dmid"><b>${escapeHtml(tukTitle(t.tuk))}<span class="tag${fuel ? ' gold' : ''}">${fuel ? 'Combustão' : 'Elétrico'}</span></b>${plate(t.tuk.plate)}<span>${escapeHtml(bits.join(' · '))}</span></div><div class="dright num">${eur(t.fat)}</div></button>`;
   }).join('');
   return heroBrand(m.businessName, 'Gestão diária · ' + m.year) + stepper(head.k, head.v, pill, 'day') + closeHero() +
-    `<main class="page">${offline(s)}<section class="card summary"><div class="sum-top"><span class="sum-label">Lucro da empresa hoje</span><span class="badge work">${day.working} a trabalhar</span></div><div class="sum-big num">${eur(day.lucro)}</div><div class="sum-row"><div class="mini"><div class="mini-k">Faturado</div><div class="mini-v num">${eur(day.fat)}</div></div><div class="mini gold"><div class="mini-k">Despesa</div><div class="mini-v num">${eur(day.desp)}</div></div></div><div class="strip"><div class="strip-row"><span>${MESES[parseISO(date).m - 1]} · <b class="num">${eur(mv.fat)}</b> de ${eur0(mv.companyObj)}</span><b class="num">${pct}%</b></div>${bar(mv.pct * 100)}</div></section>${alert}<div class="sec-title">Motoristas hoje</div><section class="card" style="padding:6px 14px"><div class="days">${rows}</div></section><div class="sec-title">Tuks hoje</div><section class="card" style="padding:6px 14px"><div class="days">${tuks}</div></section><p class="muted" style="text-align:center;font-size:12.5px;margin:6px 0 0">Toca num motorista para lançar o dia dele</p></main>` + nav('hoje');
+    `<main class="page">${offline(s)}<section class="card summary"><div class="sum-top"><span class="sum-label">Lucro da empresa hoje</span><span class="badge work">${day.working} a trabalhar</span></div><div class="sum-big num">${eur(day.lucro)}</div><div class="sum-row"><div class="mini"><div class="mini-k">Faturado</div><div class="mini-v num">${eur(day.fat)}</div></div><div class="mini gold"><div class="mini-k">Despesa</div><div class="mini-v num">${eur(day.desp)}</div></div></div><div class="strip"><div class="strip-row"><span>${MESES[parseISO(date).m - 1]} · <b class="num">${eur(mv.fat)}</b> de ${eur0(goal.company)}</span><b class="num">${pct}%</b></div>${bar(goal.pct * 100)}</div></section>${alert}<div class="sec-title">Motoristas hoje</div><section class="card" style="padding:6px 14px"><div class="days">${rows}</div></section><div class="sec-title">Tuks hoje</div><section class="card" style="padding:6px 14px"><div class="days">${tuks}</div></section><p class="muted" style="text-align:center;font-size:12.5px;margin:6px 0 0">Toca num motorista para lançar o dia dele</p></main>` + nav('hoje');
 }
 
 function tukPicker(m, date, currentId) {
@@ -279,9 +293,11 @@ function sumList(a) { return Math.round(((a || []).reduce((s, n) => s + Number(n
 function mes(s) {
   const m = s.model;
   const mv = monthView(m, m.year, s.month);
+  const goal = barGoal(mv, m);
   const head = monthHeading(m.year, s.month);
-  const over = mv.fat - mv.companyObj;
-  const reached = mv.companyObj > 0 && over >= -0.001;
+  const over = mv.fat - goal.company;
+  const reached = goal.company > 0 && over >= -0.001;
+  const owners = mv.drivers.filter(d => d.owner).length;
   const mx = scale(mv.drivers.map(d => d.fat).concat([mv.obj || 0]));
   const bars = mv.drivers.filter(d => d.active || d.fat).map(d => `<div class="hbar"><span class="hl">${escapeHtml(d.name)}</span><div class="ht"><i class="${d.reached ? 'g' : ''}" style="width:${(d.fat / mx * 100).toFixed(1)}%"></i>${mv.obj ? `<span class="goal" style="left:${(mv.obj / mx * 100).toFixed(1)}%"></span>` : ''}</div><span class="hv num">${eur0(d.fat)}</span></div>`).join('');
   const prizes = mv.drivers.filter(d => d.fat || d.active).map(d => {
@@ -309,11 +325,11 @@ function mes(s) {
   }).join('');
   const prizeN = mv.drivers.filter(d => d.prize).length;
   return heroBrand(m.businessName, 'Resumo do mês') + stepper(head.k, head.v, '', 'month') + closeHero() + `<main class="page">${offline(s)}
-    <section class="card summary"><div class="goal-card">${ring(pctInt(mv.pct), 'da empresa')}<div class="goal-info"><div class="goal-line"><span>Faturado</span><b class="num">${eur(mv.fat)}</b></div><div class="goal-line"><span>Objetivo</span><b class="num">${eur(mv.companyObj)}</b></div><div class="goal-line"><span>Motoristas</span><b class="num">${mv.workers} × ${eur0(mv.obj)}</b></div></div></div>
+    <section class="card summary"><div class="goal-card">${ring(pctInt(goal.pct), 'da empresa')}<div class="goal-info"><div class="goal-line"><span>Faturado</span><b class="num">${eur(mv.fat)}</b></div><div class="goal-line"><span>Objetivo</span><b class="num">${eur(goal.company)}</b></div><div class="goal-line"><span>Motoristas</span><b class="num">${goal.people} × ${eur0(goal.per)}</b></div></div></div>
       <div class="need"><div class="need-k">${reached ? 'Objetivo atingido' : 'Ainda falta'}</div><div class="need-v num">${reached ? '+' + eur(over) : eur(Math.abs(over))}</div><div class="need-s">Conta os ${mv.workers} motoristas que trabalharam em ${MESES[s.month - 1].toLowerCase()}, com o patrão</div></div></section>
-    <div class="kpis"><div class="kpi"><div class="kpi-k"><i></i>Lucro</div><div class="kpi-v num">${eur(mv.lucro)}</div></div><div class="kpi"><div class="kpi-k"><i style="background:var(--g500)"></i>Despesas</div><div class="kpi-v num">${eur(mv.desp)}</div></div><div class="kpi"><div class="kpi-k"><i style="background:var(--b300)"></i>Dias de tuk</div><div class="kpi-v num">${mv.tukDays}</div></div><div class="kpi"><div class="kpi-k"><i style="background:var(--b800)"></i>Média por tuk/dia</div><div class="kpi-v num">${eur(mv.tukDays ? mv.fat / mv.tukDays : 0)}</div></div><div class="kpi wide"><div class="kpi-k"><i style="background:var(--g400)"></i>Ganho do patrão · depois de partes, despesas e prémios</div><div class="kpi-v num">${eur(mv.ganho)}</div></div></div>
+    <div class="kpis"><div class="kpi"><div class="kpi-k"><i></i>Lucro</div><div class="kpi-v num">${eur(mv.lucro)}</div></div><div class="kpi"><div class="kpi-k"><i style="background:var(--g500)"></i>Despesas</div><div class="kpi-v num">${eur(mv.desp)}</div></div><div class="kpi"><div class="kpi-k"><i style="background:var(--b300)"></i>Dias de tuk</div><div class="kpi-v num">${mv.tukDays}</div></div><div class="kpi"><div class="kpi-k"><i style="background:var(--b800)"></i>Média por tuk/dia</div><div class="kpi-v num">${eur(mv.tukDays ? mv.fat / mv.tukDays : 0)}</div></div><div class="kpi wide"><div class="kpi-k"><i style="background:var(--g400)"></i>${owners > 1 ? 'Ganho dos patrões' : 'Ganho do patrão'} · depois de partes, despesas e prémios</div><div class="kpi-v num">${eur(mv.ganho)}</div></div></div>
     <div class="sec-title">Objetivo por motorista · ${eur0(mv.obj)}</div><section class="card">${bars}<div class="prize" style="margin-top:12px">${prizes}</div></section>
-    <div class="sec-title">Faturado por dia</div><section class="card"><div class="chart-box tall"><canvas id="ch-month" data-days="${days.join(',')}" data-goal="${mv.companyObj}"></canvas></div><div class="legend"><span><i style="background:#2a63ad"></i>Faturado do dia</span><span><i style="background:#d4a537"></i>Acumulado</span><span><i style="background:#8b97aa"></i>Objetivo</span></div></section>
+    <div class="sec-title">Faturado por dia</div><section class="card"><div class="chart-box tall"><canvas id="ch-month" data-days="${days.join(',')}" data-goal="${goal.company}"></canvas></div><div class="legend"><span><i style="background:#2a63ad"></i>Faturado do dia</span><span><i style="background:#d4a537"></i>Acumulado</span><span><i style="background:#8b97aa"></i>Objetivo</span></div></section>
     <div class="sec-title">Por tuk</div><section class="card" style="padding:6px 14px"><div class="days">${tukRows}</div></section>
     <div class="sec-title">Contas com motoristas</div><section class="card"><div class="rows">${accounts}${prizeN ? `<div class="r"><span>Prémios de ${MESES[s.month - 1].toLowerCase()} · ${prizeN} × ${eur0(mv.prize.amount)}</span><b>${eur(mv.prizes)}</b></div>` : ''}</div></section>
   </main>` + nav('mes');
@@ -400,8 +416,10 @@ function obj(s) {
   const cur = Number(String(m.today).slice(5, 7));
   const sameYear = Number(String(m.today).slice(0, 4)) === m.year;
   const focus = sameYear ? cur : 12;
-  const row = m.objectives.find(o => o.month === focus) || { amount: 0 };
+  const row = m.objectives.find(o => o.month === focus) || { amount: 3000 };
   const mv = monthView(m, m.year, focus);
+  const goal = barGoal(mv, m);
+  const shown = row.amount > 0 ? row.amount : 3000;
   const prize = prizeAt(m, m.year, focus);
   const history = prizeHistory(m);
   const months = m.objectives.map(o => {
@@ -418,7 +436,7 @@ function obj(s) {
   }).join('');
   const fromLabel = `A partir de ${MESES[focus - 1].toLowerCase()} ${m.year}`;
   return heroBrand(m.businessName, 'Objetivos mensais') + stepper('Objetivos de', String(m.year), '', 'year') + closeHero() + `<main class="page">${offline(s)}
-    <section class="card summary"><div class="sum-top"><span class="sum-label">Objetivo de ${MESES[focus - 1].toLowerCase()}</span><span class="badge zero">igual para todos</span></div><div class="sum-big num">${eur(row.amount)}</div><div class="strip"><div class="strip-row"><span>Empresa · ${mv.workers || activeDrivers(m).length} motoristas com o patrão</span><b class="num">${eur0((row.amount || 0) * (mv.workers || activeDrivers(m).length))}</b></div>${bar(mv.companyObj ? mv.fat / mv.companyObj * 100 : 0)}</div></section>
+    <section class="card summary"><div class="sum-top"><span class="sum-label">Objetivo de ${MESES[focus - 1].toLowerCase()}</span><span class="badge zero">igual para todos</span></div><div class="sum-big num">${eur(shown)}</div><div class="strip"><div class="strip-row"><span>Empresa · ${goal.people} motoristas com o patrão</span><b class="num">${eur0(goal.company)}</b></div>${bar(goal.pct * 100)}</div></section>
     <section class="card"><div class="card-h"><div class="card-ic gold">${I.trophy}</div><div class="card-t"><div class="card-title">Prémio</div><div class="card-sub">O mesmo para todos os motoristas que chegarem ao objetivo</div></div><button type="button" class="sw ${prize.active ? 'on' : ''}" data-act="prize-sw" aria-pressed="${prize.active}"></button></div>
       <div class="goal-row" style="padding-top:2px"><div class="gm"><b>${fromLabel}</b><span>Muda só deste mês em diante</span></div><div class="money"><input id="prize-amt" inputmode="decimal" value="${prize.raw != null ? String(prize.raw || prize.amount).replace('.', ',') : String(prize.amount).replace('.', ',')}"><span>€</span></div></div>
       ${history}<p class="muted" style="font-size:12.5px;margin:8px 0 0">O patrão conta para o objetivo, mas não recebe prémio.</p></section>
@@ -446,7 +464,8 @@ function def(s) {
   const nTuk = m.tuks.filter(t => t.status !== 'vendido').length;
   const nFuel = m.tuks.filter(t => t.status !== 'vendido' && t.fuel === 'combustão').length;
   const nDrv = activeDrivers(m).length;
-  const owner = m.drivers.find(d => isOwnerAt(m, d.id, m.today));
+  const owners = m.drivers.filter(d => d.active && isOwnerAt(m, d.id, m.today));
+  const ownerLine = owners.length > 1 ? owners.map(d => d.name).join(', ') + ' são patrões' : (owners[0] ? owners[0].name + ' é o patrão' : '');
   const daily = m.types.filter(t => t.active && t.freq === 'Diário').length;
   const monthly = m.types.filter(t => t.active && t.freq === 'Mensal').length;
   const saved = s.file && s.file.savedAt ? 'guardado há ' + ago(s.file.savedAt) : (s.mode === 'demo' ? 'só neste telemóvel' : '');
@@ -456,7 +475,7 @@ function def(s) {
       <div class="sheet-row"><div class="year-tag">${m.year}</div><div class="sr-mid"><b>${escapeHtml(m.businessName)} · ${m.year}</b><span>${escapeHtml(s.emailLabel || '')}${saved ? ' · ' + saved : ''}</span></div>${s.file ? `<a class="open-link" href="${s.file.url}" target="_blank" rel="noopener">Abrir ↗</a>` : ''}</div></section>
     <div class="sec-title">Negócio</div><section class="card set-list">
       <button type="button" class="set-row" data-act="go" data-to="pessoas"><div class="card-ic">${I.tuk}</div><div class="sm"><b>Tuks</b><span>${nTuk} tuks · ${nFuel} combustão, ${nTuk - nFuel} elétricos</span></div>${I.chev}</button>
-      <button type="button" class="set-row" data-act="go" data-to="pessoas"><div class="card-ic">${I.users}</div><div class="sm"><b>Motoristas</b><span>${nDrv} ativos · ${owner ? owner.name + ' é o patrão' : ''}</span></div>${I.chev}</button>
+      <button type="button" class="set-row" data-act="go" data-to="pessoas"><div class="card-ic">${I.users}</div><div class="sm"><b>Motoristas</b><span>${nDrv} ativos${ownerLine ? ' · ' + ownerLine : ''}</span></div>${I.chev}</button>
       <button type="button" class="set-row" data-act="go" data-to="tipos"><div class="card-ic gold">${I.tag}</div><div class="sm"><b>Tipos de gasto</b><span>${daily} diários · ${monthly} mensais</span></div>${I.chev}</button>
       <button type="button" class="set-row" data-act="go" data-to="obj"><div class="card-ic">${I.obj}</div><div class="sm"><b>Objetivos e prémio</b><span>Muda-se no separador Objetivos</span></div><span class="val" style="color:var(--b600);font-weight:700">Abrir</span>${I.chev}</button>
       <div class="set-row"><div class="card-ic gold">${I.star}</div><div class="sm"><b>Gratificações</b><span>Só do patrão · desligado esconde a coluna</span></div><button type="button" class="sw ${m.tipsEnabled ? 'on' : ''}" data-act="tips" aria-pressed="${m.tipsEnabled}"></button></div>
@@ -510,11 +529,12 @@ function tipos(s) {
 function folha(s) {
   const y = s.model.year;
   const years = [y - 1, y + 1, y + 2];
+  const chosen = s.yearChoice || (y + 1);
   return heroBack('Folha', 'Definições · ' + s.model.businessName, false) + closeHero() + `<main class="page flat">${offline(s)}
     <section class="card summary"><div class="card-h"><div class="card-ic">${I.cal}</div><div class="card-t"><div class="card-title">Criar folha de outro ano</div><div class="card-sub">Uma folha vazia, com os teus tuks, motoristas e gastos</div></div></div>
-      <div class="cats" id="year-picks" style="margin:0 0 14px">${years.map((yy, i) => `<button type="button" class="cat${i === 1 ? ' on' : ''}" data-act="pick-year" data-year="${yy}">${yy}</button>`).join('')}<button type="button" class="cat" data-act="pick-year-other">Outro…</button></div>
-      <div class="sheet-row" style="padding-bottom:0"><div class="year-tag" id="year-tag" style="background:var(--g500);color:var(--b900)">${y + 1}</div><div class="sr-mid"><b id="year-title">${escapeHtml(s.model.businessName)} · ${y + 1}</b><span>Ainda não existe · ${s.mode === 'demo' ? 'fica neste telemóvel' : 'fica na tua Drive'}</span></div></div>
-      <button type="button" class="btn btn-primary btn-block" id="year-go" data-act="create-year" data-year="${y + 1}" style="margin-top:14px">Criar folha de ${y + 1}</button></section>
+      <div class="cats" id="year-picks" style="margin:0 0 14px">${years.map(yy => `<button type="button" class="cat${yy === chosen ? ' on' : ''}" data-act="pick-year" data-year="${yy}">${yy}</button>`).join('')}<button type="button" class="cat${years.includes(chosen) ? '' : ' on'}" data-act="pick-year-other">Outro…</button></div>
+      <div class="sheet-row" style="padding-bottom:0"><div class="year-tag" id="year-tag" style="background:var(--g500);color:var(--b900)">${chosen}</div><div class="sr-mid"><b id="year-title">${escapeHtml(s.model.businessName)} · ${chosen}</b><span>Ainda não existe · ${s.mode === 'demo' ? 'fica neste telemóvel' : 'fica na tua Drive'}</span></div></div>
+      <button type="button" class="btn btn-primary btn-block" id="year-go" data-act="create-year" data-year="${chosen}" style="margin-top:14px">Criar folha de ${chosen}</button></section>
     <section class="card"><div class="card-h"><div class="card-ic gold">${I.reset}</div><div class="card-t"><div class="card-title">Repor aspeto da folha</div><div class="card-sub">Para quando se apaga uma coluna ou se mexe no tamanho sem querer</div></div></div>
       <div class="rows"><div class="r"><span>Colunas e linhas apagadas</span><b class="pos">repõe</b></div><div class="r"><span>Larguras, cores e letras</span><b class="pos">repõe</b></div><div class="r"><span>Fórmulas, totais e proteções</span><b class="pos">repõe</b></div><div class="r"><span>Os valores que escreveste</span><b>não mexe</b></div></div>
       ${s.missing && s.missing.length ? `<div class="cf-warn">${s.missing.length} separador${s.missing.length > 1 ? 'es' : ''} em falta: ${s.missing.map(escapeHtml).join(', ')}. Criar outra vez?</div><div class="btns" style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px"><button type="button" class="btn btn-ghost" data-act="close-missing">Agora não</button><button type="button" class="btn btn-gold" data-act="restore-yes">Criar outra vez</button></div>` : `<button type="button" class="btn btn-gold btn-block" style="margin-top:14px" data-act="restore">${I.reset}Repor aspeto da folha de ${y}</button>`}
@@ -533,7 +553,7 @@ function pessoas(s) {
     if (d.active && owner) sub = 'Sem %, entregas nem prémio';
     else if (d.active) {
       const ownerPct = Math.round((1 - pct.pct) * 100);
-      const since = pct.from ? `${Number(pct.from.slice(8, 10))} ${MESES_C[Number(pct.from.slice(5, 7)) - 1].toLowerCase()}` : '';
+      const since = pct.from && pct.from > PCT_START ? `${Number(pct.from.slice(8, 10))} ${MESES_C[Number(pct.from.slice(5, 7)) - 1].toLowerCase()}` : '';
       sub = `Ganha ${Math.round(pct.pct * 100)}% · patrão ${ownerPct}%${since ? ' · desde ' + since : ''}`;
     }
     const right = owner || !d.active
@@ -568,7 +588,7 @@ function pessoas(s) {
       <div class="year-row" style="margin-bottom:14px"><div class="field"><label>Alcunha<span class="opt">(opcional)</span></label><input id="new-nick" placeholder="Ex.: Preto"></div><div class="field"><label>Matrícula<span class="opt">(opcional)</span></label><input id="new-plate" placeholder="AA-00-AA"></div></div>
       <button type="button" class="btn btn-primary btn-block" data-act="add-tuk">${I.plus}Adicionar tuk</button>
     </section>
-    <p class="muted" style="text-align:center;font-size:12.5px;margin-top:14px">Até 50 tuks e 50 motoristas. Cada tuk precisa de número e tipo. A % é a parte do motorista e muda a partir desse dia.</p>
+    <p class="muted" style="text-align:center;font-size:12.5px;margin-top:14px">Até 50 tuks e 50 motoristas. Pode haver vários patrões. A % de registo vale também para os dias anteriores; uma mudança vale desde o dia 1 desse mês.</p>
   </main>`;
 }
 
@@ -582,6 +602,8 @@ function overlay(s) {
   else if (sh.type === 'tuk') inner = tukEdit(s, sh);
   else if (sh.type === 'fixed') inner = fixedSheet(s, sh);
   else if (sh.type === 'new-driver') inner = newDriver(s);
+  else if (sh.type === 'rename') inner = renameSheet(s, sh);
+  else if (sh.type === 'year') inner = yearSheet(s, sh);
   if (!inner) return '';
   return `<div class="sheet-bg show" data-act="close-sheet"></div><div class="sheet show"><div class="grab"></div>${inner}</div>`;
 }
@@ -615,7 +637,7 @@ function driverSheet(s, sh) {
   if (!d) return '';
   const owner = isOwnerAt(m, d.id, m.today);
   const pct = Math.round((pctAt(m, d.id, m.today).pct || 0) * 100);
-  return `<h3>${escapeHtml(d.name)}</h3><p>A percentagem é a parte do motorista. Uma mudança vale a partir do dia que escolheres.</p>
+  return `<h3>${escapeHtml(d.name)}</h3><p>A percentagem é a parte do motorista. Uma mudança vale desde o dia 1 desse mês. Marcar patrão não tira o lugar a outro.</p>
     <div class="field"><label>Nome</label><input id="card-name" value="${escapeHtml(d.name)}"></div>
     ${owner ? '' : `<div class="field"><label>% do motorista</label><input id="card-pct" inputmode="decimal" value="${pct}"></div><div class="field"><label>A partir de</label><input id="card-from" type="date" value="${m.today}"></div>`}
     <div class="set-row"><div class="sm"><b>É o patrão</b><span>Sem percentagem, entregas, saldo ou prémio</span></div><button type="button" class="sw ${owner ? 'on' : ''}" id="card-owner" data-act="card-owner"></button></div>
@@ -639,11 +661,22 @@ function fixedSheet(s, sh) {
     <div class="money"><input id="fixed-amt" inputmode="decimal" placeholder="0"><span>€</span></div>
     <button type="button" class="btn btn-gold btn-block" style="margin-top:14px" data-act="save-fixed" data-type="${sh.typeId}" data-tuk="${sh.tukId}">Guardar a partir deste mês</button>`;
 }
+function renameSheet(s, sh) {
+  return `<h3>Nome do tipo</h3><p>O nome novo aparece nos gastos. Os valores já lançados ficam.</p>
+    <div class="field"><label>Nome</label><input id="rename-name" value="${escapeHtml(sh.name || '')}"></div>
+    <div class="btns" style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px"><button type="button" class="btn btn-ghost" data-act="close-sheet">Cancelar</button><button type="button" class="btn btn-primary" data-act="save-rename">Guardar</button></div>`;
+}
+function yearSheet(s, sh) {
+  const suggestion = sh.year || (s.model.year + 1);
+  return `<h3>Outro ano</h3><p>Escreve o ano da folha. Pode ser um ano anterior, para registos antigos.</p>
+    <div class="field"><label>Ano</label><input id="year-other" inputmode="numeric" value="${escapeHtml(String(suggestion))}"></div>
+    <div class="btns" style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px"><button type="button" class="btn btn-ghost" data-act="close-sheet">Cancelar</button><button type="button" class="btn btn-primary" data-act="save-year">Usar este ano</button></div>`;
+}
 function newDriver() {
   return `<h3>Novo motorista</h3><p>A % é a parte dele. Podes marcá-lo como patrão.</p>
     <div class="field"><label>Nome</label><input id="nd-name" placeholder="Nome"></div>
     <div class="field"><label>% do motorista</label><input id="nd-pct" inputmode="decimal" value="50"></div>
-    <div class="set-row"><div class="sm"><b>É o patrão</b><span>Substitui o patrão atual a partir de hoje</span></div><button type="button" class="sw" id="nd-owner" data-act="nd-owner"></button></div>
+    <div class="set-row"><div class="sm"><b>É o patrão</b><span>Pode haver vários ao mesmo tempo. Vale também para os dias anteriores.</span></div><button type="button" class="sw" id="nd-owner" data-act="nd-owner"></button></div>
     <button type="button" class="btn btn-primary btn-block" data-act="save-new-driver">${I.plus}Adicionar</button>`;
 }
 

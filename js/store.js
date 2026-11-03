@@ -2,11 +2,11 @@
 
 import { cellFromParts, civilToday, monthStart, pad } from './format.js';
 import { DEMO_TODAY, buildDemo } from './demo.js';
-import { apply, blankYear, ensureRecurring, factoryTypes, isOwnerAt } from './model.js';
+import { apply, blankYear, ensureRecurring, factoryTypes, isOwnerAt, normalizePct, PCT_START } from './model.js';
 import { buildBook, contextFromModel, driverTitle, tukTitle } from './sheet.js';
 import { TMGoogle } from './google.js';
 import {
-  addSheetFromBook, backupFile, createBook, listFiles, loadBook, readKeys, repaintBook, writeCells
+  addSheetFromBook, appendLog, backupFile, createBook, listFiles, loadBook, locateJob, pushRoster, readKeys, repaintBook, writeCells
 } from './remote.js';
 
 const KEY = 'tm.v4';
@@ -19,6 +19,10 @@ export const state = {
   file: null,
   emailLabel: '',
   pending: [],
+  rosterSync: false,
+  syncError: '',
+  syncing: false,
+  toastOn: false,
   offline: typeof navigator !== 'undefined' ? !navigator.onLine : false,
   toast: '',
   toastHtml: '',
@@ -29,6 +33,7 @@ export const state = {
   month: 11,
   sheet: null,
   missing: null,
+  yearChoice: 0,
   keys: {}
 };
 
@@ -145,56 +150,104 @@ async function resolveJobs(token, fileId, jobs) {
   }
   const out = [];
   for (const job of jobs) {
-    if (job.direct) {
-      out.push({ a1: `'${job.title.replace(/'/g, "''")}'!${job.direct}`, value: job.value, baseline: job.baseline });
-      continue;
-    }
-    const keys = state.keys[job.title];
-    if (!keys) continue;
-    let col = keys.cols[job.colKey];
-    if (!col && job.colKey === 'valor') {
-      col = 4;
-    }
-    const row = keys.rows[job.rowKey];
-    if (!col || !row) continue;
-    const { colLetter } = await import('./sheet.js');
-    out.push({
-      a1: `'${job.title.replace(/'/g, "''")}'!${colLetter(col)}${row}`,
-      value: job.value,
-      baseline: job.baseline
-    });
+    const a1 = locateJob(job.direct ? null : state.keys[job.title], job);
+    if (!a1) continue;
+    out.push({ a1, value: job.value, baseline: job.baseline });
   }
   return out;
 }
 
+let toastTimer = 0;
+let toastFade = 0;
+export function note(msg, err) {
+  state.toast = msg || '';
+  state.toastHtml = '';
+  state.toastErr = !!err;
+  state.toastOn = !!msg;
+  clearTimeout(toastTimer);
+  clearTimeout(toastFade);
+  if (!msg) { poke(); return; }
+  toastTimer = setTimeout(() => {
+    state.toastOn = false;
+    poke();
+    toastFade = setTimeout(() => { state.toast = ''; state.toastErr = false; poke(); }, 380);
+  }, 2000);
+  poke();
+}
+export function armToast() {
+  state.toastOn = true;
+  clearTimeout(toastTimer);
+  clearTimeout(toastFade);
+  toastTimer = setTimeout(() => {
+    state.toastOn = false;
+    poke();
+    toastFade = setTimeout(() => { state.toastHtml = ''; poke(); }, 380);
+  }, 2000);
+}
+
+export function rosterNeedsPush(before, after) {
+  return rosterChanged(before, after);
+}
+
+function rosterChanged(before, after) {
+  const slim = (m) => JSON.stringify({
+    d: (m.drivers || []).map(d => [d.id, d.name, d.active, d.opening, d.phone, d.since]),
+    t: (m.tuks || []).map(t => [t.id, t.number, t.nickname, t.plate, t.fuel, t.status, t.soldOn]),
+    p: m.pct, y: m.types, f: m.fixed, z: m.prizes, o: m.objectives, b: m.businessName, g: m.tipsEnabled
+  });
+  return slim(before) !== slim(after);
+}
+
 export async function flush() {
-  if (state.mode !== 'google' || !state.file || !state.pending.length) return;
-  if (typeof navigator !== 'undefined' && !navigator.onLine) { state.offline = true; return; }
-  state.busy = true;
+  if (state.mode !== 'google' || !state.file) return;
+  if (!state.pending.length && !state.rosterSync) return;
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    state.offline = true;
+    state.syncError = 'Sem rede. Fica guardado neste telemóvel e segue quando voltares a ter ligação.';
+    poke();
+    return;
+  }
+  const jobs = state.pending.splice(0, state.pending.length);
+  const roster = state.rosterSync;
+  state.rosterSync = false;
+  state.syncing = true;
+  state.syncError = '';
   poke();
   try {
     const token = await TMGoogle.getToken();
-    const jobs = state.pending.splice(0, state.pending.length);
+    if (roster) await pushRoster(token, state.file.id, state.model);
+    state.keys = {};
     const resolved = await resolveJobs(token, state.file.id, jobs);
+    if (jobs.length && resolved.length < jobs.length) {
+      throw new Error('célula');
+    }
     const { conflicts } = await writeCells(token, state.file.id, resolved);
     if (conflicts.length) {
       state.model = await loadBook(token, state.file.id, state.model.year);
+      normalizePct(state.model);
       state.model.today = civilToday();
-      state.toast = 'A folha foi alterada à mão — mantive o valor da folha.';
-      state.toastErr = false;
+      note('A folha foi alterada à mão. Mantive esse valor.', false);
+    }
+    if (resolved.length) {
+      const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ');
+      await appendLog(token, state.file.id, resolved.slice(0, 40).map(j => [stamp, 'app', '', j.a1, '', String(j.baseline ?? ''), String(j.value ?? ''), '']));
     }
     state.file.savedAt = Date.now();
     state.offline = false;
+    state.syncError = '';
   } catch (e) {
+    state.pending = jobs.concat(state.pending);
+    state.rosterSync = roster || state.rosterSync;
     if (e.offline || e.message === 'sem rede') {
       state.offline = true;
-      state.toast = 'Sem rede. Fica guardado neste telemóvel e segue quando voltares a ter ligação.';
+      state.syncError = 'Sem rede. O que lançaste fica neste telemóvel até voltares a ter ligação.';
+    } else if (e.message === 'célula') {
+      state.syncError = 'Não encontrei a célula na folha. Toca em Repor aspeto da folha.';
     } else {
-      state.toast = 'Não consegui gravar na folha.';
-      state.toastErr = true;
+      state.syncError = 'Não consegui gravar na folha. Os dados ficam neste telemóvel até conseguir.';
     }
   }
-  state.busy = false;
+  state.syncing = false;
   persist();
   poke();
 }
@@ -202,7 +255,8 @@ export async function flush() {
 function rememberJobs(before, after) {
   if (state.mode !== 'google') return;
   const jobs = diffJobs(before, after);
-  if (!jobs.length) return;
+  if (rosterChanged(before, after)) state.rosterSync = true;
+  if (!jobs.length && !state.rosterSync) return;
   state.pending.push(...jobs);
   persist();
   flush();
@@ -213,15 +267,12 @@ export function dispatch(action) {
   const before = state.model;
   const res = apply(before, action);
   if (res.error) {
-    state.toast = res.error;
-    state.toastErr = true;
-    poke();
+    note(res.error, true);
     return res;
   }
   res.model.today = state.mode === 'demo' ? DEMO_TODAY : (res.model.today || civilToday());
   state.model = res.model;
-  if (res.toast) { state.toast = res.toast; state.toastHtml = ''; state.toastErr = false; }
-  if (action.type === 'assign-tuk' && res.toast) state.toastHtml = '';
+  if (res.toast) note(res.toast, false);
   rememberJobs(before, res.model);
   persist();
   poke();
@@ -240,6 +291,9 @@ export function startDemo() {
   state.route = { name: 'hoje' };
   state.pending = [];
   state.toast = '';
+  state.toastHtml = '';
+  state.toastOn = false;
+  state.syncError = '';
   persist();
   poke();
 }
@@ -250,11 +304,9 @@ export async function connectGoogle(select) {
   try {
     await TMGoogle.signIn(!!select);
     state.emailLabel = 'Conta Google ligada';
-    state.toast = 'Conta ligada. A app só vê as folhas que ela cria.';
-    state.toastErr = false;
+    note('Conta ligada. A app só vê as folhas que ela cria.', false);
   } catch (e) {
-    state.toast = e.message === 'timeout' ? 'A janela da Google fechou sem concluir.' : 'Não foi possível ligar à conta Google.';
-    state.toastErr = true;
+    note(e.message === 'timeout' ? 'A janela da Google fechou sem concluir.' : 'Não foi possível ligar à conta Google.', true);
   }
   state.busy = false;
   poke();
@@ -275,7 +327,7 @@ export async function createFromSetup(form) {
   });
   const driverId = 'm1';
   model.drivers.push({ id: driverId, name: String(form.driver || '').trim(), phone: '', since: model.today, active: true, opening: 0 });
-  model.pct.push({ driverId, from: model.today, pct: form.owner ? 0 : 0.5, role: form.owner ? 'patrão' : 'motorista' });
+  model.pct.push({ driverId, from: PCT_START, pct: form.owner ? 0 : 0.5, role: form.owner ? 'patrão' : 'motorista' });
   if (form.owner) model.fixed.push({ typeId: 'g3', tukId, from: monthStart(year, Number(model.today.slice(5, 7))), amount: 0 });
   state.busy = true;
   poke();
@@ -305,8 +357,7 @@ export async function createFromSetup(form) {
     rememberJobs(before, state.model);
     maybeBackup(token, file);
   } catch (e) {
-    state.toast = e.offline ? 'Sem rede. Não criei a folha.' : 'Não consegui criar a folha.';
-    state.toastErr = true;
+    note(e.offline ? 'Sem rede. Não criei a folha.' : 'Não consegui criar a folha.', true);
   }
   state.busy = false;
   persist();
@@ -331,7 +382,7 @@ export async function createYear(year) {
     next.today = DEMO_TODAY;
     state.model = next;
     state.month = 1;
-    state.toast = `Ano ${year} criado neste telemóvel, com os saldos transitados.`;
+    note(`Ano ${year} criado neste telemóvel, com os saldos transitados.`, false);
     persist();
     poke();
     return;
@@ -349,11 +400,9 @@ export async function createYear(year) {
     state.model = await loadBook(token, created.id, year);
     state.model.today = civilToday();
     ensureRecurring(state.model);
-    state.toast = `Folha de ${year} criada. Os saldos transitados já lá estão.`;
-    state.toastErr = false;
+    note(`Folha de ${year} criada. Os saldos transitados já lá estão.`, false);
   } catch (e) {
-    state.toast = 'Não consegui criar a folha desse ano.';
-    state.toastErr = true;
+    note('Não consegui criar a folha desse ano.', true);
   }
   state.busy = false;
   persist();
@@ -362,8 +411,7 @@ export async function createYear(year) {
 
 export async function restoreLook(recreate) {
   if (state.mode !== 'google' || !state.file) {
-    state.toast = 'Em demonstração a folha é simulada neste telemóvel.';
-    state.toastErr = false;
+    note('Em demonstração a folha é simulada neste telemóvel.', false);
     poke();
     return;
   }
@@ -394,11 +442,9 @@ export async function restoreLook(recreate) {
     state.model.today = civilToday();
     state.missing = null;
     state.keys = {};
-    state.toast = 'Aspeto da folha reposto. Os valores que tinhas escrito mantêm-se.';
-    state.toastErr = false;
+    note('Aspeto da folha reposto. Os valores que tinhas escrito mantêm-se.', false);
   } catch (e) {
-    state.toast = 'Não consegui repor o aspeto.';
-    state.toastErr = true;
+    note('Não consegui repor o aspeto.', true);
   }
   state.busy = false;
   persist();
@@ -433,17 +479,31 @@ export async function boot() {
     state.date = state.model.today;
     state.month = Number(String(state.date).slice(5, 7)) || 11;
     state.route = { name: 'hoje' };
-    if (saved.mode === 'google' && navigator.onLine) {
-      try {
-        const token = await TMGoogle.silent();
-        if (token && state.file) {
-          const fresh = await loadBook(token, state.file.id, state.model.year);
-          fresh.today = civilToday();
-          state.model = fresh;
-          state.date = fresh.today;
-          flush();
+    if (saved.mode === 'google') {
+      if (!navigator.onLine) {
+        state.syncError = 'Sem rede. Mostramos o que está neste telemóvel até voltares a ter ligação.';
+      } else {
+        try {
+          const token = await TMGoogle.silent();
+          if (token && state.file) {
+            const fresh = await loadBook(token, state.file.id, state.model.year);
+            normalizePct(fresh);
+            if (!fresh.objectives.length || fresh.objectives.every(o => !o.amount)) {
+              fresh.objectives = Array.from({ length: 12 }, (_, i) => ({ month: i + 1, amount: 3000 }));
+            }
+            fresh.today = civilToday();
+            state.model = fresh;
+            state.date = fresh.today;
+            state.month = Number(String(fresh.today).slice(5, 7)) || state.month;
+            state.rosterSync = true;
+            flush();
+          } else {
+            state.syncError = 'Entra outra vez para sincronizar a folha.';
+          }
+        } catch (e) {
+          state.syncError = 'Não consegui ler a folha. O que está neste telemóvel continua aqui.';
         }
-      } catch (e) { /* fica a cópia local */ }
+      }
     }
   } else {
     state.route = { name: 'inicio' };
@@ -461,4 +521,12 @@ export function setDate(date) { state.date = date; poke(); }
 export function setMonth(month) { state.month = month; poke(); }
 export function openSheet(sheet) { state.sheet = sheet; poke(); }
 export function closeSheet() { state.sheet = null; poke(); }
-export function clearToast() { state.toast = ''; state.toastHtml = ''; state.toastErr = false; poke(); }
+export function clearToast() {
+  clearTimeout(toastTimer);
+  clearTimeout(toastFade);
+  state.toast = '';
+  state.toastHtml = '';
+  state.toastErr = false;
+  state.toastOn = false;
+  poke();
+}
