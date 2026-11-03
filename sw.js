@@ -1,5 +1,5 @@
 /* Tuk Manager. O âmbito acompanha a pasta da app (GitHub Pages: /tuk-manager/). */
-const CACHE = 'tuk-manager-v4';
+const CACHE = 'tuk-manager-v5';
 const SHELL = [
   './',
   './index.html',

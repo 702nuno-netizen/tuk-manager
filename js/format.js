@@ -127,6 +127,35 @@ export function monthHeading(y, m) {
   return { k: String(y), v: MESES[m - 1] };
 }
 
+/** Número de série das folhas (época 1899-12-30) para uma data AAAA-MM-DD. */
+export function isoToSerial(date) {
+  const { y, m, d } = parseISO(date);
+  const utc = Date.UTC(y, m - 1, d);
+  return Math.round((utc - Date.UTC(1899, 11, 30)) / 86400000);
+}
+
+export function serialToISO(n) {
+  const d = new Date(Date.UTC(1899, 11, 30) + Math.round(Number(n)) * 86400000);
+  return iso(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate());
+}
+
+/** Chave de linha: data em texto, número de série, ou fórmula ="AAAA-MM-DD". */
+export function rowKey(v) {
+  if (v == null || v === '') return '';
+  if (typeof v === 'number' && v > 20000 && v < 120000) return serialToISO(v);
+  let s = String(v).trim();
+  const quoted = /^="(\d{4}-\d{2}-\d{2})"/.exec(s);
+  if (quoted) return quoted[1];
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+  const br = /^(\d{1,2})\/(\d{1,2})\/(\d{4})/.exec(s);
+  if (br) return iso(Number(br[3]), Number(br[2]), Number(br[1]));
+  if (/^\d{5,6}$/.test(s)) {
+    const n = Number(s);
+    if (n > 20000 && n < 120000) return serialToISO(n);
+  }
+  return s;
+}
+
 export function uid(prefix) {
   return prefix + Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-4);
 }

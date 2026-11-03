@@ -1,6 +1,6 @@
 /* Estrutura da folha v4. As células de dados encontram-se pela chave da linha e da coluna. */
 
-import { MESES, daysInMonth, pad, tukTitle as titleOf } from './format.js';
+import { MESES, daysInMonth, pad, rowKey, tukTitle as titleOf } from './format.js';
 import { isOwnerAt } from './model.js';
 
 export const APP_MARK = 'tuk-manager';
@@ -195,7 +195,7 @@ function driverSheet(plan, d, template) {
       const r = r0 + 1 + dd;
       if (dd > dim) { ws.hideRow.push(r); ws.put(r, 1, '', { color: GREY, size: 8 }); continue; }
       const key = `${year}-${pad(m)}-${pad(dd)}`;
-      ws.put(r, 1, key, { color: GREY, size: 8 });
+      ws.put(r, 1, `="${key}"`, { color: GREY, size: 8 });
       ws.put(r, 2, `=DATE(${year},${m},${dd})`, { nf: 'dd/mm', align: 'center', border: true });
       ws.put(r, 3, `=CHOOSE(WEEKDAY(B${r}),"Dom","Seg","Ter","Qua","Qui","Sex","Sáb")`, { align: 'center', border: true });
       for (const c of inputCols) ws.put(r, c, '', { bg: INP, border: true, nf: (c === 5 || c === 6 || c === 10) ? EUR : undefined, align: c === 4 ? 'center' : undefined, input: true });
@@ -237,6 +237,17 @@ function driverSheet(plan, d, template) {
   ws.checks.push({ range: 'E9:E500', kind: 'number>=0' });
   ws.checks.push({ range: 'F9:F500', kind: 'number>=0' });
   ws.checks.push({ range: 'J9:J500', kind: 'number>=0' });
+  const gratOff = ptFormula(`=${gratOn}="NÃO"`);
+  ws.cf.push(
+    { range: 'B9:C450', formula: '=AND(ISNUMBER($B9);OR(WEEKDAY($B9)=1;WEEKDAY($B9)=7))', bg: 'E2EFDA' },
+    { range: 'E9:E450', formula: '=LEFT($A9;2)="K|"', bg: 'F4C7C3' },
+    { range: 'E9:E450', formula: '=AND(LEFT($A9;2)="K|";$E9>=0,75)', bg: 'FFE699' },
+    { range: 'E9:E450', formula: '=AND(LEFT($A9;2)="K|";$E9>=1)', bg: 'B7E1C1' },
+    { range: 'B9:C450', formula: '=AND(ISNUMBER($B9);$B9<TODAY();$E9="")', bg: 'D9D9D9', color: '808080' },
+    { range: 'D9:D450', formula: '=AND(ISNUMBER($B9);$E9<>"";$D9="")', bg: 'F4C7C3' },
+    { range: 'B9:L450', formula: '=$B9=TODAY()', bg: 'FFF2CC', bold: true },
+    { range: 'F9:F450', formula: gratOff, bg: 'EFEFEF', color: 'A6A6A6' }
+  );
   ws.role = template ? 'modelo-motorista' : 'motorista';
   ws.ref = template ? 'modelo-motorista' : d.id;
   return ws;
@@ -324,7 +335,7 @@ function tukSheet(plan, t, template) {
       const r = r0 + 1 + dd;
       if (dd > dim) { ws.hideRow.push(r); continue; }
       const key = `${year}-${pad(m)}-${pad(dd)}`;
-      ws.put(r, 1, key, { color: GREY, size: 8 });
+      ws.put(r, 1, `="${key}"`, { color: GREY, size: 8 });
       ws.put(r, 2, `=DATE(${year},${m},${dd})`, { nf: 'dd/mm', align: 'center', border: true });
       ws.put(r, 3, `=CHOOSE(WEEKDAY(B${r}),"Dom","Seg","Ter","Qua","Qui","Sex","Sáb")`, { align: 'center', border: true });
       const flt = `FILTER(${CN}!$D$2:$D$4000,${CN}!$A$2:$A$4000=$A${r},${CN}!$E$2:$E$4000=$A$6)`;
@@ -403,6 +414,12 @@ function tukSheet(plan, t, template) {
   }
   ['A1:C1000', `${colLetter(auxC)}1:${colLetter(lucroC)}1000`, `${colLetter(diasC)}1:Z1000`, 'D1:L8'].forEach(r => ws.protectRange(r));
   ws.checks.push({ range: `${fLetter}9:${fimLetter}700`, kind: 'number>=0' });
+  ws.cf.push(
+    { range: `B9:${notaLetter}700`, formula: '=AND(ISNUMBER($B9);OR(WEEKDAY($B9)=1;WEEKDAY($B9)=7))', bg: 'E2EFDA' },
+    { range: `B9:C700`, formula: `=AND(ISNUMBER($B9);$B9<TODAY();$E9="";COUNT($F9:$H9)=0)`, bg: 'D9D9D9', color: '808080' },
+    { range: `B9:${notaLetter}700`, formula: '=$B9=TODAY()', bg: 'FFF2CC', bold: true },
+    { range: 'D9:D700', formula: '=LEFT($D9;1)="⚠"', bg: 'E06666', color: 'FFFFFF', bold: true }
+  );
   ws.role = template ? 'modelo-tuk' : 'tuk';
   ws.ref = template ? 'modelo-tuk' : t.id;
   ws.layout = { fimC, auxC, despC, lucroC, notaC, typeCols };
@@ -837,7 +854,7 @@ export function keyIndex(ws) {
   const rows = {};
   for (const c of ws.cells) {
     if (c.r === 1 && c.c > 1 && c.v) cols[String(c.v)] = c.c;
-    if (c.c === 1 && c.r > 1 && c.v) rows[String(c.v)] = c.r;
+    if (c.c === 1 && c.r > 1 && c.v) rows[rowKey(c.v)] = c.r;
   }
   return { cols, rows };
 }

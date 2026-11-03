@@ -24,7 +24,7 @@ export function blankYear(year) {
     pct: [],
     types: factoryTypes(),
     fixed: [],
-    objectives: Array.from({ length: 12 }, (_, i) => ({ month: i + 1, amount: 0 })),
+    objectives: Array.from({ length: 12 }, (_, i) => ({ month: i + 1, amount: 3000 })),
     prizes: [{ from: iso(year, 1, 1), active: false, amount: 0 }],
     days: {},
     tukDays: {},
@@ -46,12 +46,57 @@ export function visibleTuks(model, date) {
   return model.tuks.filter(t => t.status !== 'vendido' && !(t.soldOn && date && t.soldOn <= date));
 }
 
+export const PCT_START = '1970-01-01';
+
+function monthStartOf(date) {
+  if (!date || String(date).length < 7) return date || PCT_START;
+  return String(date).slice(0, 7) + '-01';
+}
+
+/** A primeira linha vale para todo o passado. Uma mudança vale desde o dia 1 desse mês. */
 export function pctAt(model, driverId, date) {
-  let best = null;
-  for (const p of model.pct) {
-    if (p.driverId === driverId && p.from <= date && (!best || p.from >= best.from)) best = p;
+  const rows = model.pct.filter(p => p.driverId === driverId).slice().sort((a, b) => a.from < b.from ? -1 : a.from > b.from ? 1 : 0);
+  if (!rows.length) return { driverId, from: '', pct: 0, role: 'motorista' };
+  let best = rows[0];
+  for (let i = 0; i < rows.length; i++) {
+    const start = i === 0 ? '0000-01-01' : monthStartOf(rows[i].from);
+    if (start <= date) best = rows[i];
   }
-  return best || { driverId, from: '', pct: 0, role: 'motorista' };
+  return best;
+}
+
+export function normalizePct(model) {
+  const by = {};
+  for (const p of model.pct) (by[p.driverId] = by[p.driverId] || []).push(p);
+  for (const rows of Object.values(by)) {
+    rows.sort((a, b) => a.from < b.from ? -1 : 1);
+    if (rows[0].from > PCT_START) rows[0].from = PCT_START;
+    for (let i = 1; i < rows.length; i++) rows[i].from = monthStartOf(rows[i].from);
+  }
+  return model;
+}
+
+/** Linhas de % que uma folha desse ano tem de ter. A primeira vale desde sempre; as seguintes, desde o dia 1 do mês. */
+export function pctRowsForYear(model, driverId, year) {
+  const rows = model.pct.filter(p => p.driverId === driverId).slice().sort((a, b) => a.from < b.from ? -1 : a.from > b.from ? 1 : 0);
+  if (!rows.length) return [];
+  const yearStart = iso(year, 1, 1);
+  const yearEnd = monthEnd(year, 12);
+  const effective = rows.map((p, i) => ({ ...p, start: i === 0 ? PCT_START : monthStartOf(p.from) }));
+  const out = [];
+  for (let i = 0; i < effective.length; i++) {
+    const next = i + 1 < effective.length ? effective[i + 1].start : '9999-12-31';
+    if (effective[i].start <= yearEnd && next > yearStart) {
+      const role = effective[i].role;
+      out.push({
+        driverId,
+        from: out.length ? effective[i].start : PCT_START,
+        pct: role === 'patrão' ? 0 : round2(effective[i].pct),
+        role
+      });
+    }
+  }
+  return out;
 }
 
 export function isOwnerAt(model, driverId, date) {
@@ -648,15 +693,7 @@ function mutate(model, a) {
       const id = nextId(model.drivers, 'm');
       model.drivers.push({ id, name, phone: '', since: a.since || model.today, active: a.active !== false, opening: 0 });
       const role = a.owner ? 'patrão' : 'motorista';
-      if (a.owner) {
-        for (const p of model.pct) {
-          if (p.role === 'patrão' && p.from <= (a.since || model.today)) {
-            /* o patrão anterior passa a motorista nesta data */
-          }
-        }
-        demoteOwner(model, a.since || model.today, a.fallbackPct ?? 0.5);
-      }
-      model.pct.push({ driverId: id, from: a.since || model.today, pct: role === 'patrão' ? 0 : round2(a.pct ?? 0.5), role });
+      model.pct.push({ driverId: id, from: PCT_START, pct: role === 'patrão' ? 0 : round2(a.pct ?? 0.5), role });
       return { toast: `${name} entrou`, id };
     }
     case 'update-driver': {
@@ -669,15 +706,15 @@ function mutate(model, a) {
       }
       if (a.active != null) d.active = !!a.active;
       if (a.owner != null || a.pct != null) {
-        const from = a.from || model.today;
+        const from = monthStart(a.from || model.today);
         const owner = a.owner != null ? !!a.owner : isOwnerAt(model, d.id, from);
-        if (owner) {
-          demoteOwner(model, from, a.fallbackPct ?? 0.5, d.id);
-          upsertPct(model, d.id, from, 0, 'patrão');
-        } else {
+        const rows = model.pct.filter(p => p.driverId === d.id);
+        const start = rows.length ? from : PCT_START;
+        if (owner) upsertPct(model, d.id, rows.length ? start : PCT_START, 0, 'patrão');
+        else {
           const pct = a.pct != null ? round2(a.pct) : (pctAt(model, d.id, from).pct || 0.5);
           if (pct < 0 || pct > 1) return { error: 'A percentagem tem de estar entre 0 e 100' };
-          upsertPct(model, d.id, from, pct, 'motorista');
+          upsertPct(model, d.id, rows.length ? start : PCT_START, pct, 'motorista');
         }
       }
       return { toast: 'Motorista atualizado' };
@@ -777,17 +814,6 @@ function mutate(model, a) {
   }
 }
 
-function demoteOwner(model, from, fallbackPct, exceptId) {
-  for (const d of model.drivers) {
-    if (d.id === exceptId) continue;
-    if (isOwnerAt(model, d.id, from)) {
-      const prev = pctAt(model, d.id, addDays(from, -1));
-      const pct = prev && prev.role === 'motorista' ? prev.pct : fallbackPct;
-      upsertPct(model, d.id, from, pct || 0.5, 'motorista');
-    }
-  }
-}
-
 function upsertPct(model, driverId, from, pct, role) {
   const hit = model.pct.find(p => p.driverId === driverId && p.from === from);
   if (hit) { hit.pct = role === 'patrão' ? 0 : round2(pct); hit.role = role; }
@@ -806,20 +832,15 @@ export function openingBalances(model) {
 /** Ano novo: configuração e saldos, sem os dias. */
 export function carryYear(model, newYear) {
   const open = openingBalances(model);
-  const end = monthEnd(model.year, 12);
   const next = blankYear(newYear);
   next.businessName = model.businessName;
   next.tipsEnabled = model.tipsEnabled;
   next.tuks = model.tuks.map(t => ({ ...t }));
   next.drivers = model.drivers.map(d => ({ ...d, opening: round2(open[d.id] || 0), since: d.since }));
   next.types = model.types.map(t => ({ ...t }));
-  for (const d of model.drivers) {
-    const p = pctAt(model, d.id, end);
-    next.pct.push({ driverId: d.id, from: iso(newYear, 1, 1), pct: p.role === 'patrão' ? 0 : p.pct, role: p.role });
-  }
-  const prize = prizeAt(model, model.year, 12);
-  const last = model.prizes.slice().sort((a, b) => a.from < b.from ? -1 : 1).filter(p => p.from <= end).pop();
-  next.prizes = [{ from: iso(newYear, 1, 1), active: !!(last && last.active), amount: last ? last.amount : 0 }];
+  for (const d of model.drivers) next.pct.push(...pctRowsForYear(model, d.id, newYear));
+  const prize = prizeAt(model, newYear, 12);
+  next.prizes = [{ from: iso(newYear, 1, 1), active: prize.active, amount: prize.raw != null ? prize.raw : prize.amount }];
   for (const t of model.tuks) {
     for (const tp of model.types) {
       if (tp.freq !== 'Mensal' || !tp.repeat) continue;

@@ -5,7 +5,7 @@ import { suggestions } from './view.js';
 import { render } from './view.js';
 import {
   state, subscribe, boot, dispatch, startDemo, connectGoogle, createFromSetup,
-  createYear, restoreLook, signOut, setRoute, setDate, setMonth, openSheet, closeSheet, clearToast, flush
+  createYear, restoreLook, signOut, setRoute, setDate, setMonth, openSheet, closeSheet, clearToast, flush, note, armToast
 } from './store.js';
 
 const app = document.getElementById('app');
@@ -159,7 +159,7 @@ function onHash() {
   const name = parts[0] || (state.onboarded ? 'hoje' : 'inicio');
   const id = parts[1] || '';
   const extra = parts[2] || '';
-  if (!(name === 'dia' && id === 'm2')) state.toastHtml = '';
+  if (!(name === 'dia' && id === 'm2')) { state.toastHtml = ''; state.toastOn = state.toast ? state.toastOn : false; }
   state.route = { name, id, extra };
   if (name === 'tuk' && extra === 'novo' && state.model) {
     const maint = (state.model.types || []).find(t => t.id === 'g4');
@@ -171,7 +171,8 @@ function onHash() {
       const tuk = state.model.tuks.find(t => t.id === n.tukId);
       const other = state.model.drivers.find(d => d.id === n.fromId);
       state.toastHtml = `${tuk ? tukTitleSafe(tuk) : 'O tuk'} passou para o João. <b style="color:var(--g400)">O ${other ? other.name : 'outro'} ficou sem tuk.</b>`;
-      setTimeout(() => { sessionStorage.setItem('tm.swap', '1'); clearToast(); }, 6000);
+      sessionStorage.setItem('tm.swap', '1');
+      armToast();
     }
   }
   paint();
@@ -208,8 +209,7 @@ document.body.addEventListener('click', (ev) => {
       if (m > 12) m = 12;
       setMonth(m);
     } else if (el.dataset.what === 'year') {
-      state.toast = 'Cada ano tem a sua folha. Cria-a em Definições.';
-      paint();
+      note('Cada ano tem a sua folha. Cria-a em Definições.');
     }
     return;
   }
@@ -257,14 +257,12 @@ document.body.addEventListener('click', (ev) => {
   if (act === 'add-grat') return addMoney('add-grat', null, el);
   if (act === 'add-month') return addMonth();
   if (act === 'quick') {
-    const input = el.closest('section, .sheet')?.querySelector('input');
-    if (input) input.value = el.dataset.value;
-    if (el.dataset.target === 'gasto-quick') {
-      state.sheet = { ...(state.sheet || {}), amount: el.dataset.value };
-      paint();
-      return;
+    const root = el.closest('section, .sheet') || document;
+    const input = root.querySelector('input[data-money], #gasto-amt, input');
+    if (input) {
+      input.value = el.dataset.value;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
     }
-    if (el.dataset.target && el.dataset.target.startsWith('add-')) addMoney(el.dataset.target, Number(el.dataset.value), el);
     return;
   }
   if (act === 'cat') {
@@ -319,28 +317,31 @@ document.body.addEventListener('click', (ev) => {
   if (act === 'add-type') return addType();
   if (act === 'del-type') { dispatch({ type: 'update-type', id: el.dataset.id, active: false }); return; }
   if (act === 'edit-type') {
-    const name = prompt('Nome do tipo', (state.model.types.find(t => t.id === el.dataset.id) || {}).name || '');
-    if (name) dispatch({ type: 'update-type', id: el.dataset.id, name });
+    const found = state.model.types.find(t => t.id === el.dataset.id);
+    openSheet({ type: 'rename', id: el.dataset.id, name: found ? found.name : '' });
+    return;
+  }
+  if (act === 'save-rename') {
+    const name = String((document.getElementById('rename-name') || {}).value || '').trim();
+    if (!name || !state.sheet) return;
+    dispatch({ type: 'update-type', id: state.sheet.id, name });
+    closeSheet();
     return;
   }
   if (act === 'pick-year') {
-    document.querySelectorAll('#year-picks .cat').forEach(b => b.classList.toggle('on', b === el));
-    const year = el.dataset.year;
-    const tag = document.getElementById('year-tag');
-    const title = document.getElementById('year-title');
-    const goBtn = document.getElementById('year-go');
-    if (tag) tag.textContent = year;
-    if (title) title.textContent = state.model.businessName + ' · ' + year;
-    if (goBtn) { goBtn.dataset.year = year; goBtn.textContent = 'Criar folha de ' + year; }
+    state.yearChoice = Number(el.dataset.year);
+    paint();
     return;
   }
   if (act === 'pick-year-other') {
-    const year = prompt('Ano', String(state.model.year + 1));
-    if (year && Number(year) > 1990) {
-      el.dataset.year = year;
-      el.textContent = year;
-      el.click();
-    }
+    openSheet({ type: 'year', year: String((state.yearChoice || state.model.year + 1)) });
+    return;
+  }
+  if (act === 'save-year') {
+    const year = Number(String((document.getElementById('year-other') || {}).value || '').trim());
+    if (!(year >= 1991 && year <= 2100)) return;
+    state.yearChoice = year;
+    closeSheet();
     return;
   }
   if (act === 'create-year') { createYear(Number(el.dataset.year)); return; }
@@ -348,7 +349,7 @@ document.body.addEventListener('click', (ev) => {
   if (act === 'restore-yes') { restoreLook(true); return; }
   if (act === 'suggest') {
     const values = suggestions(state.model);
-    if (!values) { state.toast = 'Ainda não há um ano anterior para propor.'; paint(); return; }
+    if (!values) { note('Ainda não há um ano anterior para propor.'); return; }
     dispatch({ type: 'set-objectives', amounts: values });
     return;
   }
@@ -411,12 +412,10 @@ function markSteps() {
 function submitSetup() {
   readDraft();
   const d = state.draft || {};
-  if (!(d.business || '').trim()) { state.toast = 'Falta o nome do negócio.'; state.toastErr = true; paint(); return; }
-  if (!(d.driver || '').trim()) { state.toast = 'Falta o nome do motorista.'; state.toastErr = true; paint(); return; }
+  if (!(d.business || '').trim()) { note('Falta o nome do negócio.', true); return; }
+  if (!(d.driver || '').trim()) { note('Falta o nome do motorista.', true); return; }
   if (!(state.emailLabel || '').includes('ligada')) {
-    state.toast = 'Entra com Google, ou experimenta a demonstração.';
-    state.toastErr = true;
-    paint();
+    note('Entra com Google, ou experimenta a demonstração.', true);
     return;
   }
   createFromSetup({
@@ -428,7 +427,7 @@ function submitSetup() {
 function addMoney(type, preset, el) {
   const scope = el && el.closest('section') ? el.closest('section') : document.querySelector('main');
   const amount = preset != null ? preset : fieldMoney(scope);
-  if (!(amount >= 0)) { state.toast = 'Escreve um valor.'; state.toastErr = true; paint(); return; }
+  if (!(amount >= 0)) return;
   const id = driverId();
   if (type === 'add-service') dispatch({ type: 'add-service', driverId: id, date: state.date, amount });
   if (type === 'add-grat') dispatch({ type: 'add-grat', driverId: id, date: state.date, amount });
@@ -465,7 +464,7 @@ function addMonth() {
 function confirmGasto() {
   const sh = state.sheet || {};
   const amount = moneyOf(document.getElementById('gasto-amt'));
-  if (!(amount >= 0) || !sh.typeId) { state.toast = 'Escolhe o tipo e o valor.'; state.toastErr = true; paint(); return; }
+  if (!(amount >= 0) || !sh.typeId) return;
   const tp = state.model.types.find(t => t.id === sh.typeId);
   if (tp && tp.freq === 'Mensal') dispatch({ type: 'add-monthly', tukId: sh.tukId, year: state.model.year, month: state.month, typeId: tp.id, amount });
   else {

@@ -3,6 +3,9 @@ button.sw{padding:0}
 .sw::after{transition:left .18s var(--ease)}
 .page.flat{padding-bottom:28px}
 .offline-bar{margin:-8px 0 14px;padding:10px 12px;border-radius:12px;background:#fff6e8;color:#7a5a12;font-size:13px;font-weight:600}
+.sync-note{margin:-8px 0 14px;padding:10px 12px;border-radius:12px;background:#eef3f9;color:#1f4e79;font-size:13px;font-weight:600;display:flex;align-items:center;justify-content:space-between;gap:10px}
+.sync-note.quiet{color:#5c6b80}
+.sync-note .link-btn{padding:6px 0;white-space:nowrap}
 .pending-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--g500);margin-right:6px}
 .setup .gbtn{color:var(--ink)}
 .setup .link-demo{display:block;text-align:center;margin-top:14px;color:var(--g400);font-weight:700;font-size:15px}
