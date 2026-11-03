@@ -106,12 +106,20 @@ function barGoal(mv, model) {
   const company = Math.round(per * people * 100) / 100;
   return { per, people, company, pct: company > 0 ? mv.fat / company : 0 };
 }
+function loading(s) {
+  if (!s.busy && !s.syncing) return '';
+  if (s.busy) {
+    const text = s.busyLabel || 'A carregar…';
+    return `<div class="loading" role="status" aria-live="polite"><div class="loading-card"><div class="spin"></div><p>${escapeHtml(text)}</p></div></div>`;
+  }
+  return '';
+}
 function offline(s) {
   if (s.mode === 'google' && s.syncError) {
     const again = s.syncError.indexOf('Entra outra vez') >= 0 ? '<button type="button" class="link-btn" data-act="google">Entrar outra vez</button>' : '';
     return `<div class="sync-note">${escapeHtml(s.syncError)}${again}</div>`;
   }
-  if (s.mode === 'google' && s.syncing) return '<div class="sync-note quiet">A gravar na folha…</div>';
+  if (s.mode === 'google' && s.syncing) return '<div class="sync-note quiet"><span class="spin"></span>A gravar na folha…</div>';
   if (!s.offline && !(s.pending && s.pending.length)) return '';
   if (s.mode !== 'google') return '';
   const n = s.pending.length;
@@ -147,7 +155,8 @@ function setup(s) {
       <div class="field"><label>Motorista</label><input id="driver" placeholder="Nome" autocomplete="name" value="${escapeHtml(d.driver || '')}"></div>
       <div class="set-row" style="padding:4px 0 2px;border:0"><div class="sm"><b>Sou eu, o patrão</b><span>Sem percentagem nem entregas</span></div><button type="button" class="sw ${owner ? 'on' : ''}" id="owner-sw" data-act="owner-sw" aria-pressed="${owner}"></button></div>
     </section>
-    <button type="button" class="btn btn-gold btn-block" data-act="create">Criar a folha de ${year} e começar</button>
+    ${s.setupError ? `<section class="card"><div class="card-h"><div class="card-ic" style="background:#fde8e4;color:#7d2416">${I.alert}</div><div class="card-t"><div class="card-title">A folha não ficou pronta</div><div class="card-sub">${escapeHtml(s.setupError)}</div></div></div></section>` : ''}
+    <button type="button" class="btn btn-gold btn-block" data-act="create" ${s.busy ? 'disabled' : ''}>${s.setupError ? 'Tentar outra vez' : `Criar a folha de ${year} e começar`}</button>
     <p style="font-size:12.5px;margin:12px 0 0">A app cria a folha «<span id="file-name">${escapeHtml(d.business || 'o teu negócio')}</span> · ${year}» na tua Drive.</p>
     <button type="button" class="link-demo" data-act="demo">Experimentar com dados de demonstração</button>
     <p style="font-size:12px;margin-top:18px"><a href="privacy.html" style="color:var(--g400)">Privacidade</a> · <a href="terms.html" style="color:var(--g400)">Termos</a></p>
@@ -682,11 +691,11 @@ function newDriver() {
 
 export function render(s) {
   logoN = 0;
-  if (!s.ready) return '<div class="setup"><h1>Tuk <em>Manager</em></h1></div>';
-  if (!s.onboarded || s.route.name === 'inicio') return setup(s) + toast(s);
+  if (!s.ready) return `<div class="setup"><h1>Tuk <em>Manager</em></h1></div>${loading(s)}`;
+  if (!s.onboarded || s.route.name === 'inicio') return setup(s) + toast(s) + loading(s);
   const name = s.route.name;
   const page = name === 'dia' ? dia(s) : name === 'mes' ? mes(s) : name === 'tuk' ? tuk(s) : name === 'ano' ? ano(s) : name === 'obj' ? obj(s) : name === 'def' ? def(s) : name === 'tipos' ? tipos(s) : name === 'folha' ? folha(s) : name === 'pessoas' ? pessoas(s) : hoje(s);
-  return page + toast(s) + overlay(s);
+  return page + toast(s) + overlay(s) + loading(s);
 }
 
 export function suggestions(model) {

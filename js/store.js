@@ -6,7 +6,7 @@ import { apply, blankYear, ensureRecurring, factoryTypes, isOwnerAt, normalizePc
 import { buildBook, contextFromModel, driverTitle, tukTitle } from './sheet.js';
 import { TMGoogle } from './google.js';
 import {
-  addSheetFromBook, appendLog, backupFile, createBook, listFiles, loadBook, locateJob, pushRoster, readKeys, repaintBook, writeCells
+  addSheetFromBook, appendLog, backupFile, createBook, loadBook, locateJob, pushRoster, readKeys, repaintBook, writeCells
 } from './remote.js';
 
 const KEY = 'tm.v4';
@@ -34,6 +34,8 @@ export const state = {
   sheet: null,
   missing: null,
   yearChoice: 0,
+  busyLabel: '',
+  setupError: '',
   keys: {}
 };
 
@@ -279,7 +281,12 @@ export function dispatch(action) {
   return res;
 }
 
-export function startDemo() {
+export async function startDemo() {
+  if (state.busy) return;
+  state.busy = true;
+  state.busyLabel = 'A abrir a demonstração…';
+  poke();
+  await new Promise(r => setTimeout(r, 900));
   const model = buildDemo();
   state.mode = 'demo';
   state.onboarded = true;
@@ -294,12 +301,16 @@ export function startDemo() {
   state.toastHtml = '';
   state.toastOn = false;
   state.syncError = '';
+  state.busy = false;
+  state.busyLabel = '';
   persist();
   poke();
 }
 
 export async function connectGoogle(select) {
+  if (state.busy) return;
   state.busy = true;
+  state.busyLabel = 'A ligar à conta…';
   poke();
   try {
     await TMGoogle.signIn(!!select);
@@ -309,6 +320,7 @@ export async function connectGoogle(select) {
     note(e.message === 'timeout' ? 'A janela da Google fechou sem concluir.' : 'Não foi possível ligar à conta Google.', true);
   }
   state.busy = false;
+  state.busyLabel = '';
   poke();
 }
 
@@ -329,21 +341,19 @@ export async function createFromSetup(form) {
   model.drivers.push({ id: driverId, name: String(form.driver || '').trim(), phone: '', since: model.today, active: true, opening: 0 });
   model.pct.push({ driverId, from: PCT_START, pct: form.owner ? 0 : 0.5, role: form.owner ? 'patrão' : 'motorista' });
   if (form.owner) model.fixed.push({ typeId: 'g3', tukId, from: monthStart(year, Number(model.today.slice(5, 7))), amount: 0 });
+  if (state.busy) return;
   state.busy = true;
+  state.busyLabel = 'A criar a folha…';
+  state.setupError = '';
   poke();
   try {
     const token = await TMGoogle.getToken();
-    const files = await listFiles(token);
-    const existing = files.find(f => f.appProperties && f.appProperties.role === 'main' && f.appProperties.year === String(year));
-    let file;
-    if (existing) {
-      file = { id: existing.id, name: existing.name, url: `https://docs.google.com/spreadsheets/d/${existing.id}/edit`, year };
-      state.model = await loadBook(token, existing.id, year);
-    } else {
-      const created = await createBook(token, model);
-      file = { ...created, year };
-      state.model = await loadBook(token, created.id, year);
-    }
+    const preferred = state.file && Number(state.file.year) === year ? state.file.id : '';
+    const created = await createBook(token, model, preferred);
+    const file = { ...created, year };
+    state.file = file;
+    persist();
+    state.model = await loadBook(token, created.id, year);
     state.model.today = civilToday();
     const before = structuredClone(state.model);
     ensureRecurring(state.model);
@@ -354,24 +364,25 @@ export async function createFromSetup(form) {
     state.month = Number(state.model.today.slice(5, 7));
     state.route = { name: 'hoje' };
     state.emailLabel = 'Conta Google ligada';
+    state.setupError = '';
     rememberJobs(before, state.model);
-    maybeBackup(token, file);
+    try { await maybeBackup(token, file); } catch (e) { /* a cópia não impede a entrada */ }
   } catch (e) {
-    note(e.offline ? 'Sem rede. Não criei a folha.' : 'Não consegui criar a folha.', true);
+    if (e.fileId) {
+      state.file = { id: e.fileId, name: e.fileName || model.businessName, year, url: `https://docs.google.com/spreadsheets/d/${e.fileId}/edit` };
+    }
+    state.setupError = e.offline
+      ? 'Sem rede. Se a folha chegou a ser criada, fica na Drive. Quando voltares a ter ligação, toca em Tentar outra vez — uso a mesma.'
+      : 'Não consegui acabar a folha. Se ela já está na Drive, toca em Tentar outra vez: continuo nessa, sem criar outra.';
   }
   state.busy = false;
+  state.busyLabel = '';
   persist();
   poke();
 }
 
 async function maybeBackup(token, file) {
-  const stamp = new Date().toISOString().slice(0, 10);
-  const key = 'tm.backup.' + file.year;
-  try {
-    if (localStorage.getItem(key) === stamp) return;
-    await backupFile(token, file);
-    localStorage.setItem(key, stamp);
-  } catch (e) { /* a cópia é secundária */ }
+  await backupFile(token, file);
 }
 
 export async function createYear(year) {
@@ -387,7 +398,9 @@ export async function createYear(year) {
     poke();
     return;
   }
+  if (state.busy) return;
   state.busy = true;
+  state.busyLabel = 'A criar a folha…';
   poke();
   try {
     const token = await TMGoogle.getToken();
@@ -395,7 +408,8 @@ export async function createYear(year) {
     const next = carryYear(state.model, year);
     next.today = civilToday();
     next.previousId = state.file.id;
-    const created = await createBook(token, next);
+    const preferred = state.file && Number(state.file.year) === Number(year) ? state.file.id : '';
+    const created = await createBook(token, next, preferred);
     state.file = { ...created, year };
     state.model = await loadBook(token, created.id, year);
     state.model.today = civilToday();
@@ -405,6 +419,7 @@ export async function createYear(year) {
     note('Não consegui criar a folha desse ano.', true);
   }
   state.busy = false;
+  state.busyLabel = '';
   persist();
   poke();
 }
@@ -415,7 +430,9 @@ export async function restoreLook(recreate) {
     poke();
     return;
   }
+  if (state.busy) return;
   state.busy = true;
+  state.busyLabel = 'A repor o aspeto…';
   poke();
   try {
     const token = await TMGoogle.getToken();
@@ -425,6 +442,7 @@ export async function restoreLook(recreate) {
     if (result.missing.length && !recreate) {
       state.missing = result.missing;
       state.busy = false;
+      state.busyLabel = '';
       poke();
       return;
     }
@@ -447,6 +465,7 @@ export async function restoreLook(recreate) {
     note('Não consegui repor o aspeto.', true);
   }
   state.busy = false;
+  state.busyLabel = '';
   persist();
   poke();
 }
@@ -480,6 +499,10 @@ export async function boot() {
     state.month = Number(String(state.date).slice(5, 7)) || 11;
     state.route = { name: 'hoje' };
     if (saved.mode === 'google') {
+      state.busy = true;
+      state.busyLabel = 'A ler a folha…';
+      state.ready = true;
+      poke();
       if (!navigator.onLine) {
         state.syncError = 'Sem rede. Mostramos o que está neste telemóvel até voltares a ter ligação.';
       } else {
@@ -507,8 +530,12 @@ export async function boot() {
     }
   } else {
     state.route = { name: 'inicio' };
+    if (saved && saved.file) state.file = saved.file;
+    if (saved && saved.emailLabel) state.emailLabel = saved.emailLabel;
   }
   state.ready = true;
+  state.busy = false;
+  state.busyLabel = '';
   poke();
   if (typeof window !== 'undefined') {
     window.addEventListener('online', () => { state.offline = false; flush(); });

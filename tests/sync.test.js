@@ -5,7 +5,7 @@ import { isoToSerial, rowKey } from '../js/format.js';
 import {
   PCT_START, apply, blankYear, isOwnerAt, monthView, normalizePct, pctAt, pctRowsForYear
 } from '../js/model.js';
-import { cellSame, formatRequests, locateJob } from '../js/remote.js';
+import { cellSame, decideSetup, formatRequests, locateJob } from '../js/remote.js';
 import { buildBook } from '../js/sheet.js';
 import { diffJobs, rosterNeedsPush } from '../js/store.js';
 import { render } from '../js/view.js';
@@ -147,6 +147,54 @@ test('a barra de objetivo nunca diz zero e o aviso desaparece', () => {
   assert.equal(view.includes('prompt('), false);
   assert.equal(app.includes('Escreve um valor'), false);
   assert.equal(view.includes('Substitui o patrão'), false);
+});
+
+test('a preparação reutiliza a folha do ano e não cria uma segunda', () => {
+  const tagged = (id, year, role, bytes, created) => ({
+    id, name: 'Casa · ' + year, createdTime: created, quotaBytesUsed: String(bytes),
+    appProperties: { tmApp: 'tuk-manager', role, year: String(year), ready: '0' }
+  });
+  const files = [
+    tagged('nova', 2026, 'main', 10, '2026-11-03T02:00:00Z'),
+    tagged('antiga', 2026, 'main', 8000, '2026-11-01T01:00:00Z'),
+    tagged('copia', 2026, 'backup', 8000, '2026-11-01T03:00:00Z'),
+    tagged('outro', 2025, 'main', 9000, '2025-01-01T00:00:00Z')
+  ];
+  assert.equal(decideSetup(files, { role: 'main', year: 2026, title: 'Casa · 2026' }).id, 'antiga');
+  assert.equal(decideSetup(files, { role: 'main', year: 2026, preferredId: 'nova', title: 'Casa · 2026' }).id, 'nova');
+  assert.equal(decideSetup(files, { role: 'backup', year: 2026 }).action, 'reuse');
+  assert.equal(decideSetup(files, { role: 'main', year: 2024, title: 'Casa · 2024' }).action, 'create');
+  const orphans = [{ id: 'solta', name: 'Casa · 2026', createdTime: '2026-11-02T00:00:00Z', quotaBytesUsed: '20' }];
+  assert.equal(decideSetup(orphans, { role: 'main', year: 2026, title: 'Casa · 2026' }).id, 'solta');
+  let creates = 0;
+  const box = [];
+  const step = () => {
+    const d = decideSetup(box, { role: 'main', year: 2026, title: 'Casa · 2026' });
+    if (d.action === 'create') {
+      creates += 1;
+      box.push(tagged('unica', 2026, 'main', 100, '2026-11-03T00:00:00Z'));
+      return 'unica';
+    }
+    return d.id;
+  };
+  assert.equal(step(), 'unica');
+  assert.equal(step(), 'unica');
+  assert.equal(creates, 1);
+  assert.equal(decideSetup(box, { role: 'backup', year: 2026 }).action, 'create');
+  box.push(tagged('copia-1', 2026, 'backup', 10, '2026-11-03T04:00:00Z'));
+  assert.equal(decideSetup(box, { role: 'backup', year: 2026 }).id, 'copia-1');
+});
+
+test('o ecrã de espera e o tentar outra vez', () => {
+  const base = { ready: true, onboarded: false, route: { name: 'inicio' }, mode: null, draft: {}, pending: [], toast: '', toastHtml: '', toastOn: false, sheet: null };
+  const wait = render({ ...base, busy: true, busyLabel: 'A criar a folha…' });
+  assert.match(wait, /A criar a folha…/);
+  assert.match(wait, /class="spin"/);
+  assert.match(wait, /disabled/);
+  const again = render({ ...base, busy: false, setupError: 'Não consegui acabar a folha.' });
+  assert.match(again, /Tentar outra vez/);
+  assert.match(again, /Não consegui acabar a folha/);
+  assert.equal(again.includes('prompt('), false);
 });
 
 test('o ecrã mostra a ficha, o diálogo e o aviso a desaparecer', () => {
