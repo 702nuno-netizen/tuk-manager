@@ -1,77 +1,156 @@
-/* Formatação de dinheiro e datas (pt-PT / en). */
-(function (root, factory) {
-  const api = factory();
-  if (typeof module === 'object' && module.exports) module.exports = api;
-  if (root) root.TMFormat = api;
-})(typeof globalThis !== 'undefined' ? globalThis : this, function () {
-  'use strict';
+/* Datas, dinheiro e textos curtos em português europeu. */
 
-  function locale(lang) { return lang === 'en' ? 'en-GB' : 'pt-PT'; }
+export const MESES = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'];
+export const MESES_C = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
+export const MESES_L = ['janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho', 'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro'];
+export const SEMANA = ['Domingo', 'Segunda-feira', 'Terça-feira', 'Quarta-feira', 'Quinta-feira', 'Sexta-feira', 'Sábado'];
+export const SEMANA_C = ['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb'];
 
-  function parseAmount(s) {
-    if (typeof s === 'number') return isFinite(s) ? s : NaN;
-    if (s == null) return NaN;
-    let t = String(s).trim().replace(/\s|\u00a0|€/g, '');
-    if (!t) return NaN;
-    const lastComma = t.lastIndexOf(',');
-    const lastDot = t.lastIndexOf('.');
-    if (lastComma >= 0 && lastDot >= 0) {
-      if (lastComma > lastDot) t = t.replace(/\./g, '').replace(',', '.');
-      else t = t.replace(/,/g, '');
-    } else if (lastComma >= 0) t = t.replace(',', '.');
-    if (!/^-?\d+(\.\d+)?$/.test(t)) return NaN;
-    return Number(t);
+export const PLATE_RE = /^([A-Z]{2}|[0-9]{2})-([A-Z]{2}|[0-9]{2})-([A-Z]{2}|[0-9]{2})$/;
+
+export function pad(n) { return String(n).padStart(2, '0'); }
+
+export function iso(y, m, d) { return `${y}-${pad(m)}-${pad(d)}`; }
+
+export function parseISO(s) {
+  const [y, m, d] = String(s || '').split('-').map(Number);
+  return { y, m, d };
+}
+
+export function weekday(date) {
+  const { y, m, d } = parseISO(date);
+  return new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+}
+
+export function daysInMonth(y, m) {
+  return new Date(Date.UTC(y, m, 0)).getUTCDate();
+}
+
+export function monthStart(y, m) { return iso(y, m, 1); }
+export function monthEnd(y, m) { return iso(y, m, daysInMonth(y, m)); }
+export function ym(y, m) { return `${y}-${pad(m)}`; }
+export function addDays(date, n) {
+  const { y, m, d } = parseISO(date);
+  const t = new Date(Date.UTC(y, m - 1, d + n));
+  return iso(t.getUTCFullYear(), t.getUTCMonth() + 1, t.getUTCDate());
+}
+
+/** Hora civil de Portugal continental, sem nomear um fuso com cidade. UTC+0, UTC+1 no verão. */
+export function civilToday(now = new Date()) {
+  const y = now.getUTCFullYear();
+  const lastSunday = (year, monthIndex) => {
+    const last = new Date(Date.UTC(year, monthIndex + 1, 0));
+    return last.getUTCDate() - last.getUTCDay();
+  };
+  const start = Date.UTC(y, 2, lastSunday(y, 2), 1);
+  const end = Date.UTC(y, 9, lastSunday(y, 9), 1);
+  const dst = now.getTime() >= start && now.getTime() < end;
+  const local = new Date(now.getTime() + (dst ? 3600000 : 0));
+  return iso(local.getUTCFullYear(), local.getUTCMonth() + 1, local.getUTCDate());
+}
+
+export function civilTime(now = new Date()) {
+  const y = now.getUTCFullYear();
+  const lastSunday = (year, monthIndex) => {
+    const last = new Date(Date.UTC(year, monthIndex + 1, 0));
+    return last.getUTCDate() - last.getUTCDay();
+  };
+  const start = Date.UTC(y, 2, lastSunday(y, 2), 1);
+  const end = Date.UTC(y, 9, lastSunday(y, 9), 1);
+  const dst = now.getTime() >= start && now.getTime() < end;
+  const local = new Date(now.getTime() + (dst ? 3600000 : 0));
+  return `${local.getUTCHours()}:${pad(local.getUTCMinutes())}`;
+}
+
+export function round2(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return 0;
+  return Math.round((x + Number.EPSILON) * 100) / 100;
+}
+
+export function sum(list) {
+  let s = 0;
+  for (const n of list || []) s += Number(n) || 0;
+  return round2(s);
+}
+
+export function eur(n, dec = true) {
+  const x = Number(n) || 0;
+  const neg = x < 0;
+  const v = Math.abs(x);
+  const [a, b] = v.toFixed(dec ? 2 : 0).split('.');
+  const int = a.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+  return (neg ? '−' : '') + int + (dec ? ',' + b : '') + ' €';
+}
+
+export function eur0(n) { return eur(Math.round(Number(n) || 0), false); }
+
+export function pctLabel(p) {
+  const n = Math.round(Number(p) * 1000) / 10;
+  const t = Number.isInteger(n) ? String(n) : String(n).replace('.', ',');
+  return t + '%';
+}
+
+export function tukNum(n) { return 'Tuk ' + pad(n); }
+
+export function tukTitle(t) {
+  if (!t) return 'Tuk';
+  const base = tukNum(t.number || 0);
+  return t.nickname ? `${base} ${t.nickname}` : base;
+}
+
+export function plateText(plate) {
+  const p = String(plate || '').trim().toUpperCase();
+  return p || '';
+}
+
+export function plateBad(plate) {
+  const p = plateText(plate);
+  return !!p && !PLATE_RE.test(p);
+}
+
+export function initials(name) {
+  const s = String(name || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^A-Za-z]/g, '');
+  return (s.slice(0, 2) || '·').toUpperCase();
+}
+
+export function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+}
+
+export function dayHeading(date) {
+  const { d, m } = parseISO(date);
+  return { k: SEMANA[weekday(date)], v: `${d} de ${MESES_L[m - 1]}` };
+}
+
+export function monthHeading(y, m) {
+  return { k: String(y), v: MESES[m - 1] };
+}
+
+export function uid(prefix) {
+  return prefix + Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-4);
+}
+
+/** Partes de uma fórmula de soma (=70+50+90) ou um número. Aceita vírgula decimal. */
+export function partsFromCell(v) {
+  if (v == null || v === '') return [];
+  if (typeof v === 'number') return Number.isFinite(v) ? [round2(v)] : [];
+  let s = String(v).trim();
+  if (!s) return [];
+  if (s.startsWith('=')) s = s.slice(1);
+  s = s.replace(/\s/g, '');
+  if (/^[0-9+.,]+$/.test(s) && s.includes('+')) {
+    return s.split('+').filter(Boolean).map(x => round2(Number(x.replace(',', '.')))).filter(n => Number.isFinite(n));
   }
+  const n = Number(s.replace(/\./g, '').replace(',', '.'));
+  if (s.includes(',') && !s.includes('+')) return Number.isFinite(n) ? [round2(n)] : [];
+  const plain = Number(String(v).trim().replace(',', '.'));
+  return Number.isFinite(plain) ? [round2(plain)] : [];
+}
 
-  function formatMoney(amount, lang, currency) {
-    const n = Number(amount) || 0;
-    return new Intl.NumberFormat(locale(lang), {
-      style: 'currency', currency: currency || 'EUR',
-      minimumFractionDigits: 2, maximumFractionDigits: 2
-    }).format(n);
-  }
-
-  function formatPlain(amount, lang) {
-    const n = Number(amount) || 0;
-    return new Intl.NumberFormat(locale(lang), { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
-  }
-
-  function formatChip(amount, lang, currency) {
-    const n = Number(amount) || 0;
-    const whole = Math.abs(n - Math.round(n)) < 0.001;
-    if (!whole) return formatMoney(n, lang, currency);
-    const num = new Intl.NumberFormat(locale(lang), { maximumFractionDigits: 0 }).format(Math.round(n));
-    if ((currency || 'EUR') === 'EUR') return lang === 'en' ? '€' + num : num + ' €';
-    return formatMoney(n, lang, currency);
-  }
-
-  const WD_PT = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado'];
-  const WD_EN = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-  const WDS_PT = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
-  const WDS_EN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-  const MO_PT = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'];
-  const MO_EN = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
-  const MOS_PT = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
-  const MOS_EN = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-
-  function parts(iso) {
-    const [y, m, d] = String(iso || '').split('-').map(Number);
-    const wd = new Date(Date.UTC(y, (m || 1) - 1, d || 1)).getUTCDay();
-    return { y, m, d, wd };
-  }
-  function weekdayLong(iso, lang) { const p = parts(iso); return (lang === 'en' ? WD_EN : WD_PT)[p.wd]; }
-  function weekdayShort(iso, lang) { const p = parts(iso); return (lang === 'en' ? WDS_EN : WDS_PT)[p.wd]; }
-  function monthLong(m, lang) { return (lang === 'en' ? MO_EN : MO_PT)[(m || 1) - 1] || ''; }
-  function monthShort(m, lang) { return (lang === 'en' ? MOS_EN : MOS_PT)[(m || 1) - 1] || ''; }
-  function longDate(iso, lang) {
-    const p = parts(iso);
-    if (lang === 'en') return p.d + ' ' + monthLong(p.m, lang);
-    return p.d + ' de ' + monthLong(p.m, lang).toLowerCase();
-  }
-  function shortDate(iso, lang) {
-    const p = parts(iso);
-    return p.d + ' ' + monthShort(p.m, lang);
-  }
-
-  return { parseAmount, formatMoney, formatPlain, formatChip, weekdayLong, weekdayShort, monthLong, monthShort, longDate, shortDate };
-});
+export function cellFromParts(parts) {
+  const p = (parts || []).map(round2).filter(n => Number.isFinite(n));
+  if (!p.length) return '';
+  if (p.length === 1) return p[0];
+  return '=' + p.join('+');
+}
