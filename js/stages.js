@@ -19,6 +19,26 @@ export function googleMessage(body) {
   return raw.replace(/\s+/g, ' ').trim();
 }
 
+/** Parte uma lista para caber em poucos pedidos. Cada bocado fica abaixo de maxBytes. */
+export function splitPayload(items, maxBytes) {
+  const limit = Math.max(1000, Number(maxBytes) || 8000000);
+  const chunks = [];
+  let cur = [];
+  let size = 2;
+  for (const item of items || []) {
+    const n = JSON.stringify(item).length + 1;
+    if (cur.length && size + n > limit) {
+      chunks.push(cur);
+      cur = [];
+      size = 2;
+    }
+    cur.push(item);
+    size += n;
+  }
+  if (cur.length) chunks.push(cur);
+  return chunks;
+}
+
 export function explainError(e) {
   if (!e || e.offline) return 'sem ligação';
   const status = Number(e.status) || 0;

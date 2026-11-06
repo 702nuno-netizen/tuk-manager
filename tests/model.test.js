@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildDemo } from '../js/demo.js';
-import { apply, dayCompany, monthView, yearView, visibleTuks, plateBad } from '../js/model.js';
+import { apply, blankYear, dayCompany, monthView, yearView, visibleTuks, plateBad } from '../js/model.js';
 import { weekday } from '../js/format.js';
 
 const model = buildDemo();
@@ -14,7 +14,7 @@ test('hoje: empresa, partes e sem tuk', () => {
   const day = dayCompany(model, '2026-11-02');
   assert.equal(day.fat, 745);
   assert.equal(day.desp, 33);
-  assert.equal(day.lucro, 712);
+  assert.equal(day.lucro, 416.5);
   assert.equal(day.working, 3);
   const joao = day.people.find(p => p.driver.id === 'm2');
   assert.equal(joao.sh.fat, 250);
@@ -82,7 +82,7 @@ test('ano fecha os totais do ecrã', () => {
   const y = yearView(model);
   assert.equal(y.fat, 96100);
   assert.equal(y.desp, 10085);
-  assert.equal(y.lucro, 86015);
+  assert.equal(y.lucro, 53542.85);
   assert.equal(y.tukDays, 611);
   assert.equal(y.planned, 123000);
   assert.equal(y.grat, 1294.8);
@@ -126,4 +126,38 @@ test('prémio de novembro é 100 e o de outubro é 80', () => {
   assert.equal(monthView(model, 2026, 10).prize.amount, 80);
   assert.equal(monthView(model, 2026, 11).prize.amount, 100);
   assert.equal(monthView(model, 2026, 11).drivers.find(d => d.id === 'm1').prize, 0);
+});
+
+test('lucro da empresa desconta a parte do motorista e todas as despesas', () => {
+  const m = blankYear(2026);
+  m.drivers = [
+    { id: 'o', name: 'Patrão', owner: true, active: true, since: '2026-01-01' },
+    { id: 'd', name: 'Meio', owner: false, active: true, since: '2026-01-01' }
+  ];
+  m.pct = [
+    { driverId: 'o', from: '1970-01-01', pct: 0, role: 'patrão' },
+    { driverId: 'd', from: '1970-01-01', pct: 0.5, role: 'motorista' }
+  ];
+  m.tuks = [
+    { id: 't1', number: 1, status: 'ativo', fuel: 'combustão' },
+    { id: 't2', number: 2, status: 'ativo', fuel: 'combustão' }
+  ];
+  m.days = {
+    o: { '2026-11-02': { tukId: 't1', services: [200], grat: [], entregue: [], note: '' } },
+    d: { '2026-11-02': { tukId: 't2', services: [200], grat: [], entregue: [], note: '' } }
+  };
+  m.tukDays = {
+    t1: { '2026-11-02': { byType: { g1: [10] }, note: '' } },
+    t2: { '2026-11-02': { byType: { g1: [10] }, note: '' } }
+  };
+  const day = dayCompany(m, '2026-11-02');
+  const meio = day.people.find(p => p.driver.id === 'd');
+  assert.equal(meio.sh.driver, 100);
+  assert.equal(meio.sh.owner, 100);
+  assert.equal(day.fat, 400);
+  assert.equal(day.desp, 20);
+  assert.equal(day.lucro, 280);
+  const mv = monthView(m, 2026, 11);
+  assert.equal(mv.lucro, 280);
+  assert.equal(mv.ganho, 280);
 });

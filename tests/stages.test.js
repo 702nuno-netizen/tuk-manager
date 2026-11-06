@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildBook } from '../js/sheet.js';
-import { decideSetup, formatRequests } from '../js/remote.js';
+import { blankYear } from '../js/model.js';
+import { decideSetup, fastBatches, formatRequests, shouldStage } from '../js/remote.js';
 import {
-  STEP_GAP_MS, auditRequests, bareSheetRefs, explainError, orderSheets, planRun, progressText, reconcileIndex, runStages, stepLabel
+  STEP_GAP_MS, auditRequests, bareSheetRefs, explainError, orderSheets, planRun, progressText, reconcileIndex, runStages, splitPayload, stepLabel
 } from '../js/stages.js';
 
 function book() {
@@ -117,4 +118,29 @@ test('não se cria uma segunda folha e o erro explica a causa', () => {
   const full = 'Não é possível unir células congeladas e não congeladas neste intervalo longo que não pode ser cortado.';
   const body = JSON.stringify({ error: { code: 400, message: full } });
   assert.equal(explainError({ status: 400, body }), full);
+  const limited = new Error('limite');
+  limited.status = 429;
+  assert.equal(shouldStage(limited), true);
+  const huge = new Error('grande');
+  huge.status = 400;
+  huge.body = 'Request payload too large';
+  assert.equal(shouldStage(huge), true);
+  const formula = new Error('formula');
+  formula.status = 400;
+  formula.body = 'Invalid requests[3].mergeCells';
+  assert.equal(shouldStage(formula), false);
+  const parts = splitPayload([{ n: 'a'.repeat(700) }, { n: 'b'.repeat(700) }, { n: 'c'.repeat(700) }], 1000);
+  assert.equal(parts.length, 3);
+  const sample = blankYear(2026);
+  sample.businessName = 'Casa';
+  sample.drivers = [
+    { id: 'm1', name: 'Nuno', owner: true, since: '2026-01-01', active: true },
+    { id: 'm2', name: 'Paulo', owner: false, since: '2026-01-01', active: true }
+  ];
+  sample.pct = [{ driverId: 'm2', from: '1970-01-01', pct: 0.5, role: 'motorista' }];
+  sample.tuks = [{ id: 't1', number: 1, nickname: 'Azul', fuel: 'combustão', status: 'ativo' }];
+  const fast = fastBatches(sample);
+  assert.equal(fast.valueParts, 1);
+  assert.ok(fast.formatParts <= 2);
+  assert.ok(fast.valueParts + fast.formatParts <= 3);
 });

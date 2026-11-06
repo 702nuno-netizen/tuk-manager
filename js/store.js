@@ -56,7 +56,8 @@ function persist() {
       emailLabel: state.emailLabel,
       build: state.build || null,
       paintIndex: state.paintIndex || 0,
-      paintDone: !!state.paintDone
+      paintDone: !!state.paintDone,
+      copyPending: !!state.copyPending
     }));
   } catch (e) { /* cheio ou privado */ }
 }
@@ -204,7 +205,14 @@ function rosterChanged(before, after) {
   return slim(before) !== slim(after);
 }
 
-export async function flush() {
+let flight = null;
+export function flush() {
+  if (flight) return flight;
+  flight = flushBody().finally(() => { flight = null; });
+  return flight;
+}
+
+async function flushBody() {
   if (state.mode !== 'google' || !state.file) return;
   if (!state.pending.length && !state.rosterSync) return;
   if (typeof navigator !== 'undefined' && !navigator.onLine) {
@@ -227,13 +235,7 @@ export async function flush() {
     if (jobs.length && resolved.length < jobs.length) {
       throw new Error('célula');
     }
-    const { conflicts } = await writeCells(token, state.file.id, resolved);
-    if (conflicts.length) {
-      state.model = await loadBook(token, state.file.id, state.model.year);
-      normalizePct(state.model);
-      state.model.today = civilToday();
-      note('A folha foi alterada à mão. Mantive esse valor.', false);
-    }
+    await writeCells(token, state.file.id, resolved);
     if (resolved.length) {
       const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ');
       await appendLog(token, state.file.id, resolved.slice(0, 40).map(j => [stamp, 'app', '', j.a1, '', String(j.baseline ?? ''), String(j.value ?? ''), '']));
@@ -278,7 +280,9 @@ export function dispatch(action) {
   }
   res.model.today = state.mode === 'demo' ? DEMO_TODAY : (res.model.today || civilToday());
   state.model = res.model;
-  if (res.toast) note(res.toast, false);
+  const saved = new Set(['set-objective', 'set-objectives', 'set-business', 'set-tips', 'update-type', 'add-type', 'update-driver', 'add-driver', 'update-tuk', 'add-tuk', 'set-fixed', 'set-prize']);
+  if (saved.has(action.type)) note('Modificado com sucesso', false);
+  else if (res.toast) note(res.toast, false);
   rememberJobs(before, res.model);
   persist();
   poke();
@@ -379,7 +383,7 @@ export async function createFromSetup(form) {
     state.emailLabel = 'Conta Google ligada';
     state.setupError = '';
     rememberJobs(before, state.model);
-    try { await maybeBackup(token, file, state.model); } catch (e) { /* a cópia não impede a entrada */ }
+    state.copyToken = token;
   } catch (e) {
     rememberFailure(e, model, year);
   }
@@ -387,6 +391,9 @@ export async function createFromSetup(form) {
   state.busyLabel = '';
   persist();
   poke();
+  const token = state.copyToken;
+  state.copyToken = '';
+  if (token && state.onboarded && !state.setupError) Promise.resolve(flush()).finally(() => scheduleBackup(token));
 }
 
 function progressHooks(prefix) {
@@ -400,9 +407,10 @@ function progressHooks(prefix) {
       persist();
     },
     onProgress: async (info) => {
-      const text = prefix
-        ? `${prefix}, separador ${info.index + 1} de ${info.total}: ${info.label}`
-        : (info.text || progressText(info.index, info.total, info.label));
+      const text = info.text
+        || (prefix
+          ? `${prefix}, separador ${info.index + 1} de ${info.total}: ${info.label}`
+          : progressText(info.index, info.total, info.label));
       state.busyLabel = text;
       state.setupIndex = info.index;
       state.setupTotal = info.total;
@@ -435,15 +443,22 @@ function rememberFailure(e, model, year) {
   console.warn('[folha]', state.setupReason, e && e.body ? e.body : '');
 }
 
-async function maybeBackup(token, file, model) {
-  await backupFile(token, file, model, {
-    labelPrefix: 'A criar a cópia',
-    onProgress: async (info) => {
-      state.busyLabel = info.text || `A criar a cópia, separador ${info.index + 1} de ${info.total}: ${info.label}`;
-      state.setupIndex = info.index;
-      state.setupTotal = info.total;
-      poke();
-    }
+function scheduleBackup(token) {
+  if (!token || !state.file || state.copying) return;
+  state.copying = true;
+  state.copyPending = true;
+  persist();
+  poke();
+  backupFile(token, state.file).then(() => {
+    state.copying = false;
+    state.copyPending = false;
+    persist();
+    poke();
+  }).catch(() => {
+    state.copying = false;
+    state.copyPending = true;
+    persist();
+    poke();
   });
 }
 
@@ -480,6 +495,7 @@ export async function createYear(year) {
     ensureRecurring(state.model);
     state.build = { fileId: created.id, year, index: state.setupTotal || 0, done: true };
     note(`Folha de ${year} criada. Os saldos transitados já lá estão.`, false);
+    state.copyToken = token;
   } catch (e) {
     rememberFailure(e, next, year);
     note(state.setupReason || 'Não consegui criar a folha desse ano.', true);
@@ -488,6 +504,9 @@ export async function createYear(year) {
   state.busyLabel = '';
   persist();
   poke();
+  const token = state.copyToken;
+  state.copyToken = '';
+  if (token && !state.setupError) Promise.resolve(flush()).finally(() => scheduleBackup(token));
 }
 
 export async function restoreLook(recreate) {
@@ -573,6 +592,7 @@ export async function boot() {
   TMGoogle.setClientId((window.TM_CONFIG && window.TM_CONFIG.clientId) || '');
   let saved = null;
   try { saved = JSON.parse(localStorage.getItem(KEY) || 'null'); } catch (e) { saved = null; }
+  if (saved && saved.copyPending) state.copyPending = true;
   if (saved && saved.build && !saved.build.done && saved.build.model && saved.build.fileId) {
     state.build = saved.build;
     state.file = { id: saved.build.fileId, year: saved.build.year, url: `https://docs.google.com/spreadsheets/d/${saved.build.fileId}/edit`, name: saved.build.model.businessName || '' };
@@ -605,6 +625,7 @@ export async function boot() {
       state.route = { name: 'hoje' };
       state.emailLabel = 'Conta Google ligada';
       state.setupError = '';
+      state.copyToken = token;
     } catch (e) {
       rememberFailure(e, saved.build.model, saved.build.year);
     }
@@ -640,7 +661,8 @@ export async function boot() {
             state.date = fresh.today;
             state.month = Number(String(fresh.today).slice(5, 7)) || state.month;
             state.rosterSync = true;
-            flush();
+            const after = flush();
+            if (saved.copyPending) Promise.resolve(after).finally(() => scheduleBackup(token));
           } else {
             state.syncError = 'Entra outra vez para sincronizar a folha.';
           }
@@ -660,6 +682,9 @@ export async function boot() {
   state.busy = false;
   state.busyLabel = '';
   poke();
+  const token = state.copyToken;
+  state.copyToken = '';
+  if (token && state.onboarded && !state.setupError) Promise.resolve(flush()).finally(() => scheduleBackup(token));
   if (typeof window !== 'undefined') {
     window.addEventListener('online', () => { state.offline = false; flush(); });
     window.addEventListener('offline', () => { state.offline = true; poke(); });

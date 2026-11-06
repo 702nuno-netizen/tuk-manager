@@ -5,7 +5,7 @@ import { blankYear, ensureRecurring } from './model.js';
 import { buildBook, colLetter, contextFromModel, keyIndex } from './sheet.js';
 import {
   STEP_GAP_MS, backoffMs, explainError, formatIdMap, legalMerges, orderSheets, parseIdMap, progressText, requiredGrid,
-  reconcileIndex, runStages, stepLabel
+  reconcileIndex, runStages, splitPayload, stepLabel
 } from './stages.js';
 
 const DRIVE = 'https://www.googleapis.com/drive/v3';
@@ -363,6 +363,48 @@ async function sendRequests(token, id, requests, chunk = 10) {
   }
 }
 
+const BULK_BYTES = 8000000;
+
+export function shouldStage(e) {
+  if (!e) return false;
+  if (e.offline) return true;
+  const status = Number(e.status) || 0;
+  if (status === 429 || status === 413 || status >= 500) return true;
+  const body = String(e.body || e.message || '');
+  return /payload|too large|entity too large|exceeds the limit|too many/i.test(body);
+}
+
+async function sendBulk(token, id, requests) {
+  const chunks = splitPayload(requests, BULK_BYTES);
+  if (chunks.length > 3) {
+    const err = new Error('payload');
+    err.status = 413;
+    err.body = 'Request payload too large';
+    throw err;
+  }
+  for (const piece of chunks) {
+    if (!piece.length) continue;
+    await gfetch(token, `${SHEETS}/${id}:batchUpdate`, { method: 'POST', body: JSON.stringify({ requests: piece }) });
+  }
+}
+
+async function writeValueChunks(token, fileId, data) {
+  const chunks = splitPayload(data, BULK_BYTES);
+  if (chunks.length > 2) {
+    const err = new Error('payload');
+    err.status = 413;
+    err.body = 'Request payload too large';
+    throw err;
+  }
+  for (const piece of chunks) {
+    if (!piece.length) continue;
+    await gfetch(token, `${SHEETS}/${fileId}/values:batchUpdate`, {
+      method: 'POST',
+      body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: piece })
+    });
+  }
+}
+
 function valueBands(ws, size = 60) {
   const rows = gridOf(ws);
   const bands = [];
@@ -504,6 +546,65 @@ function baseProps(role, year, extra) {
   return { tmApp: APP_MARK, role, year: String(year), ...extra };
 }
 
+async function fastFill(token, fileId, model, kind) {
+  const meta = await gfetch(token, `${SHEETS}/${fileId}?fields=properties(locale,title),sheets(properties(sheetId,title),protectedRanges(protectedRangeId),conditionalFormats)`);
+  const existing = new Map();
+  for (const s of meta.sheets || []) existing.set(s.properties.title, s.properties.sheetId);
+  const book = assignGids(buildBook(contextFromModel(model)), existing, {});
+  if (kind === 'paint') for (const ws of book.sheets) fillInputs(ws, model);
+  const titles = new Set(book.sheets.map(ws => ws.title));
+  const setup = [];
+  if (!meta.properties || meta.properties.locale !== 'pt_PT') {
+    setup.push({ updateSpreadsheetProperties: { properties: { locale: 'pt_PT', title: meta.properties && meta.properties.title }, fields: 'locale,title' } });
+  }
+  for (const ws of book.sheets) {
+    const grid = requiredGrid(ws);
+    if (!existing.has(ws.title)) {
+      setup.push({ addSheet: { properties: { sheetId: ws.sheetId, title: ws.title, hidden: !!ws.hidden, tabColor: hexColor(ws.color), gridProperties: grid } } });
+    } else {
+      setup.push({ updateSheetProperties: { properties: { sheetId: ws.sheetId, hidden: !!ws.hidden, tabColor: hexColor(ws.color), gridProperties: grid }, fields: 'hidden,tabColor,gridProperties.rowCount,gridProperties.columnCount' } });
+    }
+  }
+  const clear = [];
+  for (const s of meta.sheets || []) {
+    const title = s.properties.title;
+    if (titles.has(title)) {
+      const id = s.properties.sheetId;
+      for (const pr of s.protectedRanges || []) {
+        if (pr.protectedRangeId != null) clear.push({ deleteProtectedRange: { protectedRangeId: pr.protectedRangeId } });
+      }
+      const rules = (s.conditionalFormats || []).length;
+      for (let i = rules - 1; i >= 0; i--) clear.push({ deleteConditionalFormatRule: { sheetId: id, index: i } });
+    } else if (DEFAULT_TITLES.has(title)) {
+      setup.push({ deleteSheet: { sheetId: s.properties.sheetId } });
+    }
+  }
+  if (setup.length) await sendBulk(token, fileId, setup);
+  const data = [];
+  const formats = [];
+  for (const ws of book.sheets) {
+    data.push(...valueBands(ws));
+    formats.push(...formatRequests(ws));
+  }
+  await writeValueChunks(token, fileId, data);
+  await sendBulk(token, fileId, clear.concat(formats));
+}
+
+export function fastBatches(model) {
+  const book = fillGids(buildBook(contextFromModel(model)));
+  const values = [];
+  const formats = [];
+  for (const ws of book.sheets) {
+    values.push(...valueBands(ws));
+    formats.push(...formatRequests(ws));
+  }
+  return {
+    sheets: book.sheets.length,
+    valueParts: splitPayload(values, BULK_BYTES).length,
+    formatParts: splitPayload(formats, BULK_BYTES).length
+  };
+}
+
 export async function createBook(token, model, preferredId, hooks = {}) {
   const year = model.year;
   const title = `${model.businessName} · ${year}`;
@@ -526,7 +627,20 @@ export async function createBook(token, model, preferredId, hooks = {}) {
       await stampFile(token, chosen.id, baseProps(role, year, { ready: '1', setupIndex: props.setupIndex || '' }));
       return { id: chosen.id, name: chosen.name || title, url: sheetUrl(chosen.id) };
     }
-    await stampFile(token, chosen.id, baseProps(role, year, { ready: '0', setupIndex: String(props.setupIndex || hooks.localIndex || 0) }));
+    const index = Math.max(Number(props.setupIndex) || 0, Number(hooks.localIndex) || 0);
+    await stampFile(token, chosen.id, baseProps(role, year, { ready: '0', setupIndex: String(index) }));
+    if (index === 0 && role === 'main') {
+      try {
+        if (hooks.onProgress) await hooks.onProgress({ index: 0, total: 1, text: 'A criar a folha…' });
+        await fastFill(token, chosen.id, model, 'build');
+        await stampFile(token, chosen.id, baseProps(role, year, { ready: '1', setupIndex: '1' }));
+        if (hooks.onDone) await hooks.onDone(1, chosen.id);
+        return { id: chosen.id, name: chosen.name || title, url: sheetUrl(chosen.id) };
+      } catch (e) {
+        if (!shouldStage(e)) throw e;
+        console.warn('[folha] pedido único falhou, sigo separador a separador', explainError(e));
+      }
+    }
     const staged = await stageBook(token, chosen.id, model, {
       ...hooks,
       kind: 'build',
@@ -810,6 +924,14 @@ export async function repaintBook(token, fileId, model, hooks = {}) {
   for (const ws of book.sheets) if (!byTitle[ws.title] && !ws.hidden) missing.push(ws.title);
   if (missing.length) return { missing };
   const info = await gfetch(token, `${DRIVE}/files/${fileId}?fields=appProperties`);
+  try {
+    if (hooks.onProgress) await hooks.onProgress({ index: 0, total: 1, text: 'A repor o aspeto…' });
+    await fastFill(token, fileId, model, 'paint');
+    return { missing: [] };
+  } catch (e) {
+    if (!shouldStage(e)) throw e;
+    console.warn('[folha] repor num pedido falhou, sigo separador a separador', explainError(e));
+  }
   await stageBook(token, fileId, model, {
     ...hooks,
     kind: 'paint',
@@ -952,24 +1074,14 @@ export async function appendLog(token, fileId, lines) {
 
 export async function writeCells(token, spreadsheetId, jobs) {
   if (!jobs.length) return { conflicts: [] };
-  const ranges = jobs.map(j => j.a1);
-  const q = ranges.map(r => 'ranges=' + encodeURIComponent(r)).join('&');
-  const data = await gfetch(token, `${SHEETS}/${spreadsheetId}/values:batchGet?valueRenderOption=FORMULA&${q}`);
-  const conflicts = [];
-  const updates = [];
-  (data.valueRanges || []).forEach((vr, i) => {
-    const current = vr.values && vr.values[0] ? vr.values[0][0] : '';
-    const base = jobs[i].baseline == null ? '' : jobs[i].baseline;
-    if (!cellSame(current, base)) conflicts.push({ ...jobs[i], current });
-    else updates.push({ range: jobs[i].a1, values: [[jobs[i].value == null ? '' : jobs[i].value]] });
-  });
+  const updates = jobs.map(j => ({ range: j.a1, values: [[j.value == null ? '' : j.value]] }));
   for (let i = 0; i < updates.length; i += 100) {
     await gfetch(token, `${SHEETS}/${spreadsheetId}/values:batchUpdate`, {
       method: 'POST',
       body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data: updates.slice(i, i + 100) })
     });
   }
-  return { conflicts };
+  return { conflicts: [] };
 }
 
 export function locateJob(keys, job) {
@@ -1001,22 +1113,18 @@ export async function readKeys(token, spreadsheetId, sheetTitle) {
   return { cols, rows };
 }
 
-export async function backupFile(token, file, model, hooks = {}) {
-  if (!model) {
-    const files = await listFiles(token);
-    const existing = chooseFile(files, { role: 'backup', year: file.year });
-    if (existing) return existing.id;
-    const copy = await gfetch(token, `${DRIVE}/files/${file.id}/copy`, {
-      method: 'POST',
-      body: JSON.stringify({
-        name: `${file.name} (cópia)`,
-        appProperties: baseProps('backup', file.year, { ready: '1', setupIndex: '' })
-      })
-    });
-    return copy.id;
-  }
-  const made = await createBook(token, model, '', { ...hooks, role: 'backup', labelPrefix: 'A criar a cópia' });
-  return made.id;
+export async function backupFile(token, file) {
+  const files = await listFiles(token);
+  const existing = chooseFile(files, { role: 'backup', year: file.year });
+  if (existing) return existing.id;
+  const copy = await gfetch(token, `${DRIVE}/files/${file.id}/copy`, {
+    method: 'POST',
+    body: JSON.stringify({
+      name: `${file.name} (cópia)`,
+      appProperties: baseProps('backup', file.year, { ready: '1' })
+    })
+  });
+  return copy.id;
 }
 
 export async function setColumnHidden(token, spreadsheetId, sheetId, colIndex, hidden) {
