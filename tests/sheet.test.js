@@ -76,4 +76,10 @@ test('fórmulas com ponto e vírgula e entradas livres', () => {
   assert.ok(nuno.protect.some(p => p.startsWith('G1:I')));
   assert.equal(ptFormula('=SUM(A1,B1)'), '=SUM(A1;B1)');
   assert.equal(ptFormula('=TEXT(A1,"#,##0.00")'), '=TEXT(A1;"#,##0.00")');
+  const painel = book.sheets.find(s => s.title === '📊 Painel');
+  const lucro = painel.cells.find(c => c.r === 10 && c.c === 8);
+  assert.match(String(lucro.v), /SUMIFS/);
+  assert.doesNotMatch(String(lucro.v), /B10-G10/);
+  const label = painel.cells.find(c => String(c.v).includes('Lucro'));
+  assert.match(String(label.v), /parte da empresa/);
 });

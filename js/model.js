@@ -382,7 +382,7 @@ export function monthView(model, year, month) {
   let tukDays = 0;
   for (const t of tuks) tukDays += t.serviceDays;
   return {
-    year, month, obj, prize, fat, desp, lucro: round2(fat - desp), grat, workers, companyObj, prizes,
+    year, month, obj, prize, fat, desp, lucro: round2(ownerFat + ownerParts - desp), grat, workers, companyObj, prizes,
     ownerFat, ownerParts, ganho, drivers, tuks, cat, tukDays,
     pct: companyObj > 0 ? fat / companyObj : 0
   };
@@ -391,7 +391,7 @@ export function monthView(model, year, month) {
 export function yearView(model) {
   const year = model.year;
   const months = [];
-  let fat = 0, desp = 0, grat = 0, tukDays = 0, planned = 0;
+  let fat = 0, desp = 0, lucro = 0, grat = 0, tukDays = 0, planned = 0;
   const cat = {};
   const byDriver = {};
   const byTuk = {};
@@ -404,6 +404,7 @@ export function yearView(model) {
     months.push({ month: m, ...mv, plan });
     fat = round2(fat + mv.fat);
     desp = round2(desp + mv.desp);
+    lucro = round2(lucro + mv.lucro);
     grat = round2(grat + mv.grat);
     tukDays += mv.tukDays;
     planned = round2(planned + plan);
@@ -412,7 +413,7 @@ export function yearView(model) {
     for (const t of mv.tuks) byTuk[t.id] = round2((byTuk[t.id] || 0) + t.fat);
   }
   return {
-    year, fat, desp, lucro: round2(fat - desp), grat, tukDays, planned,
+    year, fat, desp, lucro, grat, tukDays, planned,
     pct: planned > 0 ? fat / planned : 0,
     avg: tukDays ? round2(fat / tukDays) : 0,
     months, cat, byDriver, byTuk, activeN
@@ -421,7 +422,7 @@ export function yearView(model) {
 
 export function dayCompany(model, date) {
   const { y, m } = parseISO(date);
-  let fat = 0, desp = 0, working = 0;
+  let fat = 0, desp = 0, company = 0, working = 0;
   const people = [];
   const tukRows = [];
   for (const d of activeDrivers(model)) {
@@ -432,6 +433,7 @@ export function dayCompany(model, date) {
     if (sh.fat > 0 || (rec && rec.services && rec.services.length)) working += sh.fat > 0 || (rec && rec.services.length) ? 1 : 0;
     if (rec && rec.services && rec.services.length && sh.fat === 0) working += 0;
     fat = round2(fat + sh.fat);
+    company = round2(company + (owner ? sh.fat : sh.owner));
     const due = owner ? 0 : round2(sh.owner - sum(rec ? rec.entregue : []));
     people.push({
       driver: d, rec, sh, owner, tuk: tukId ? tuk(model, tukId) : null,
@@ -453,7 +455,7 @@ export function dayCompany(model, date) {
     tukRows.push({ tuk: t, ex, drivers, fat: tf });
   }
   const mv = monthView(model, y, m);
-  return { date, fat, desp, lucro: round2(fat - desp), working, people, tukRows, month: mv };
+  return { date, fat, desp, lucro: round2(company - desp), working, people, tukRows, month: mv };
 }
 
 export function suggestFromPrior(prior) {

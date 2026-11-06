@@ -9,6 +9,7 @@ import {
   monthlyTypes, monthView, pctAt, PCT_START, prizeAt, saldoAte, sharesOf, suggestFromPrior,
   tukMonth, visibleTuks, yearView
 } from './model.js';
+import { APP_VERSION } from './version.js';
 
 let logoN = 0;
 const I = {
@@ -120,16 +121,17 @@ function demoBar(s) {
   return `<div class="demo-bar"><span>Modo demonstração</span><button type="button" data-act="ask-exit-demo">Sair</button></div>`;
 }
 function offline(s) {
+  const copy = s.copying ? '<div class="sync-note quiet"><span class="spin"></span>A guardar cópia…</div>' : '';
   if (s.mode === 'google' && s.syncError) {
     const again = s.syncError.indexOf('Entra outra vez') >= 0 ? '<button type="button" class="link-btn" data-act="google">Entrar outra vez</button>' : '';
-    return `<div class="sync-note">${escapeHtml(s.syncError)}${again}</div>`;
+    return copy + `<div class="sync-note">${escapeHtml(s.syncError)}${again}</div>`;
   }
-  if (s.mode === 'google' && s.syncing) return '<div class="sync-note quiet"><span class="spin"></span>A gravar na folha…</div>';
-  if (!s.offline && !(s.pending && s.pending.length)) return '';
-  if (s.mode !== 'google') return '';
+  if (s.mode === 'google' && s.syncing) return copy + '<div class="sync-note quiet"><span class="spin"></span>A gravar na folha…</div>';
+  if (!s.offline && !(s.pending && s.pending.length)) return copy;
+  if (s.mode !== 'google') return copy;
   const n = s.pending.length;
   const txt = s.offline ? 'Sem rede. O que lançares fica neste telemóvel e segue quando voltares a ter ligação.' : `A gravar ${n} alteração${n > 1 ? 'ões' : ''}…`;
-  return `<div class="offline-bar">${n ? '<i class="pending-dot"></i>' : ''}${escapeHtml(txt)}</div>`;
+  return copy + `<div class="offline-bar">${n ? '<i class="pending-dot"></i>' : ''}${escapeHtml(txt)}</div>`;
 }
 
 function setup(s) {
@@ -165,6 +167,7 @@ function setup(s) {
     <p style="font-size:12.5px;margin:12px 0 0">A app cria a folha «<span id="file-name">${escapeHtml(d.business || 'o teu negócio')}</span> · ${year}» na tua Drive.</p>
     <button type="button" class="link-demo" data-act="demo">Experimentar com dados de demonstração</button>
     <p style="font-size:12px;margin-top:18px"><a href="privacy.html" style="color:var(--g400)">Privacidade</a> · <a href="terms.html" style="color:var(--g400)">Termos</a></p>
+    <p class="app-ver">v${APP_VERSION}</p>
   </div>`;
 }
 function pad2(n) { return String(n).padStart(2, '0'); }
@@ -502,6 +505,7 @@ function def(s) {
       <div class="set-row"><div class="card-ic">${I.globe}</div><div class="sm"><b>Idioma</b><span>Português da Europa</span></div><span class="val">Português</span></div>
     </section>
     <p class="muted" style="text-align:center"><a href="privacy.html">Privacidade</a> · <a href="terms.html">Termos</a></p>
+    <p class="app-ver">v${APP_VERSION}</p>
   </main>`;
 }
 function ago(ts) {

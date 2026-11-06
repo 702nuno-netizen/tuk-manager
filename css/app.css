@@ -18,6 +18,7 @@ button.sw{padding:0}
 .pending-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--g500);margin-right:6px}
 .setup .gbtn{color:var(--ink)}
 .setup .link-demo{display:block;text-align:center;margin-top:14px;color:var(--g400);font-weight:700;font-size:15px}
+.app-ver{margin:4px 0 0;text-align:center;font-size:11px;letter-spacing:.04em;color:var(--g400)}
 .field input.warn{border-color:#e0b000}
 .sheet .field{margin-bottom:12px}
 .nav button{min-height:64px}

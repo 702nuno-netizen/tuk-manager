@@ -636,7 +636,7 @@ function painel(plan) {
   const bands = [
     [1, 2, 'Faturado', NAVY, LIGHT, '=B22', EURN],
     [3, 4, 'Total de despesas', RED, 'FCE4E4', '=G22', EURN],
-    [5, 7, 'Lucro (faturado − despesas)', GREEN, GREENL, '=H22', EURN],
+    [5, 7, 'Lucro (parte da empresa − despesas)', GREEN, GREENL, '=H22', EURN],
     [8, 9, 'Dias com serviço', NAVY, LIGHT, '=I22', '0'],
     [10, 11, 'Média por dia', NAVY, LIGHT, '=IFERROR(B22/I22,0)', EURN],
     [12, 13, '% Objetivo', NAVY, LIGHT, '=M22', PCT],
@@ -665,7 +665,7 @@ function painel(plan) {
       `=SUMIFS(${CC('AL')},${CC('AJ')},${m},${CC('AK')},${QTI}!$B$4)`,
       `=SUMIFS(${CC('AL')},${CC('AJ')},${m})-E${r}`,
       `=SUM(C${r}:F${r})`,
-      `=B${r}-G${r}`,
+      `=SUMIFS(${CC('J')},${CC('N')},${m})-G${r}`,
       `=IFERROR(ROWS(UNIQUE(FILTER(${CC('B')},${CC('N')}=${m},${CC('F')}<>""))),0)`,
       plan.objectives ? (plan.objectives[m - 1] || 0) : 0,
       `=IFERROR(ROWS(UNIQUE(FILTER(${CC('C')},${CC('N')}=${m},${CC('F')}<>""))),0)`,
