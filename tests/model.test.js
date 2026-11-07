@@ -53,8 +53,11 @@ test('outubro do tuk 01 e da empresa', () => {
   const mv = monthView(model, 2026, 10);
   const t1 = mv.tuks.find(t => t.id === 't1');
   assert.equal(t1.fat, 4120);
+  assert.equal(t1.empresa, 3870);
   assert.equal(t1.desp, 660);
-  assert.equal(t1.lucro, 3460);
+  assert.equal(t1.lucro, 3210);
+  const somaTuks = Math.round(mv.tuks.reduce((s, t) => s + t.lucro, 0) * 100) / 100;
+  assert.equal(somaTuks, mv.lucro);
   assert.equal(t1.serviceDays, 22);
   assert.equal(t1.who.m1, 18);
   assert.equal(t1.who.m2, 4);
