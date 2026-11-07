@@ -5,7 +5,7 @@ import {
   monthHeading, parseISO, pctLabel, plateBad, tukTitle, weekday
 } from './format.js';
 import {
-  activeDrivers, dailyTypes, dayCompany, dayRec, driverMonth, isOwnerAt, monthlyAmount,
+  activeDrivers, dailyTypes, dayAssignments, dayCompany, dayRec, driverMonth, isOwnerAt, monthlyAmount,
   monthlyTypes, monthView, pctAt, PCT_START, prizeAt, saldoAte, sharesOf, suggestFromPrior,
   tukMonth, visibleTuks, yearView
 } from './model.js';
@@ -134,15 +134,19 @@ function offline(s) {
   return copy + `<div class="offline-bar">${n ? '<i class="pending-dot"></i>' : ''}${escapeHtml(txt)}</div>`;
 }
 
+function googleOn(s) {
+  return !!(s.googleLinked || (s.emailLabel && String(s.emailLabel).indexOf('ligada') >= 0));
+}
 function setup(s) {
   const year = new Date().getFullYear();
   const d = s.draft || {};
   const num = d.number || 1;
   const fuel = d.fuel || 'combustão';
   const owner = d.owner !== false;
-  const linked = s.emailLabel && s.emailLabel.indexOf('ligada') >= 0;
+  const linked = googleOn(s);
+  const who = s.accountEmail || s.emailLabel || 'Conta Google';
   const google = linked
-    ? `<div class="connected"><div class="cf-ic" style="background:#fff">${I.check}</div><div style="flex:1;min-width:0"><b>Ligada</b><span>${escapeHtml(s.emailLabel)}</span></div><button type="button" class="link-btn" data-act="google" data-select="1">Trocar</button></div>`
+    ? `<div class="connected"><div class="cf-ic" style="background:#fff">${I.check}</div><div style="flex:1;min-width:0"><b>Ligada</b><span>${escapeHtml(who)}</span></div><button type="button" class="link-btn" data-act="google" data-select="1">Trocar</button></div>`
     : `<button type="button" class="gbtn" data-act="google">${G} Entrar com Google</button>`;
   return `<div class="setup" style="justify-content:flex-start;padding-top:36px">
     <img class="logo-xl" src="icons/icon-192.png" alt="">
@@ -207,7 +211,7 @@ function hoje(s) {
       sub = bits.join(' · ');
     }
     let right = '<div class="dright num off">—</div>';
-    if (!p.semTuk) {
+    if (!p.semTuk && p.services) {
       const small = p.owner ? '<small style="color:var(--muted)">empresa</small>' : (p.due > 0.004 ? `<small style="color:var(--g600)">por entregar ${eur(p.due)}</small>` : (p.entregue > 0 ? '<small style="color:var(--ok)">entregue ✓</small>' : ''));
       right = `<div class="dright num">${eur(p.sh.fat)}${small}</div>`;
     }
@@ -237,11 +241,9 @@ function hoje(s) {
 
 function tukPicker(m, date, currentId) {
   const tuks = visibleTuks(m, date);
+  const map = dayAssignments(m, date);
   return '<div class="tuks">' + tuks.map(t => {
-    const who = m.drivers.filter(d => {
-      const rec = dayRec(m, d.id, date);
-      return rec && rec.tukId === t.id;
-    });
+    const who = m.drivers.filter(d => map[d.id] === t.id);
     const on = currentId === t.id;
     const label = on ? 'Escolhido' : (who[0] ? 'com ' + who[0].name : 'livre');
     const fuel = t.fuel === 'combustão';
@@ -259,7 +261,8 @@ function dia(s) {
   const owner = isOwnerAt(m, d.id, date);
   const pct = pctAt(m, d.id, date);
   const sh = sharesOf(m, d.id, date, rec);
-  const tuk = rec && rec.tukId ? m.tuks.find(t => t.id === rec.tukId) : null;
+  const tukId = dayAssignments(m, date)[d.id] || '';
+  const tuk = tukId ? m.tuks.find(t => t.id === tukId) : null;
   const sub = owner ? 'Patrão · sem % nem entregas' : `Motorista · ganha ${Math.round((pct.pct || 0) * 100)}%`;
   const pill = date === m.today ? '<span class="today-pill">● Hoje</span>' : '';
   const blocked = !tuk;
@@ -487,9 +490,9 @@ function def(s) {
   const monthly = m.types.filter(t => t.active && t.freq === 'Mensal').length;
   const saved = s.file && s.file.savedAt ? 'guardado há ' + ago(s.file.savedAt) : (s.mode === 'demo' ? 'só neste telemóvel' : '');
   return heroBack('Definições', m.businessName, false) + closeHero() + `<main class="page flat">${offline(s)}
-    <section class="card summary"><div class="card-h"><div class="card-ic gold">${I.shop}</div><div class="card-t"><div class="card-title">Nome do negócio</div><div class="card-sub">Aparece no topo da app e no nome da folha</div></div></div><div class="field" style="margin-bottom:0"><input id="biz-edit" value="${escapeHtml(m.businessName)}"></div></section>
+    <section class="card summary"><div class="card-h"><div class="card-ic gold">${I.shop}</div><div class="card-t"><div class="card-title">Nome do negócio</div><div class="card-sub">Aparece no topo da app e no nome dos ficheiros deste ano</div></div></div><div class="field" style="margin-bottom:0"><input id="biz-edit" value="${escapeHtml(m.businessName)}"></div></section>
     <section class="card"><div class="card-h"><div class="card-ic gold">${I.notes}</div><div class="card-t"><div class="card-title">Folha em uso</div><div class="card-sub">${s.mode === 'demo' ? 'Demonstração, sem Google' : 'Uma folha por ano, na tua Drive'}</div></div></div>
-      <div class="sheet-row"><div class="year-tag">${m.year}</div><div class="sr-mid"><b>${escapeHtml(m.businessName)} · ${m.year}</b><span>${escapeHtml(s.emailLabel || '')}${saved ? ' · ' + saved : ''}</span></div>${s.file ? `<a class="open-link" href="${s.file.url}" target="_blank" rel="noopener">Abrir ↗</a>` : ''}</div></section>
+      <div class="sheet-row"><div class="year-tag">${m.year}</div><div class="sr-mid"><b>${escapeHtml(m.businessName)} · ${m.year}</b><span>${escapeHtml(s.accountEmail || s.emailLabel || '')}${saved ? ' · ' + saved : ''}</span></div>${s.file ? `<a class="open-link" href="${s.file.url}" target="_blank" rel="noopener">Abrir ↗</a>` : ''}</div></section>
     <div class="sec-title">Negócio</div><section class="card set-list">
       <button type="button" class="set-row" data-act="go" data-to="pessoas"><div class="card-ic">${I.tuk}</div><div class="sm"><b>Tuks</b><span>${nTuk} tuks · ${nFuel} combustão, ${nTuk - nFuel} elétricos</span></div>${I.chev}</button>
       <button type="button" class="set-row" data-act="go" data-to="pessoas"><div class="card-ic">${I.users}</div><div class="sm"><b>Motoristas</b><span>${nDrv} ativos${ownerLine ? ' · ' + ownerLine : ''}</span></div>${I.chev}</button>
@@ -500,7 +503,7 @@ function def(s) {
     <div class="sec-title">Folha e conta</div><section class="card set-list">
       <button type="button" class="set-row" data-act="go" data-to="folha"><div class="card-ic">${I.cal}</div><div class="sm"><b>Criar folha de outro ano</b><span>Uma folha vazia para qualquer ano</span></div>${I.chev}</button>
       <button type="button" class="set-row" data-act="go" data-to="folha"><div class="card-ic gold">${I.reset}</div><div class="sm"><b>Repor aspeto da folha</b><span>Repõe o desenho, sem mexer nos valores</span></div>${I.chev}</button>
-      <div class="set-row"><div class="card-ic">${I.globe}</div><div class="sm"><b>${s.mode === 'demo' ? 'Modo demonstração' : 'Conta Google'}</b><span>${escapeHtml(s.emailLabel || '')}</span></div>${s.mode === 'demo' ? '<button type="button" class="link-btn" data-act="google">Entrar</button>' : '<button type="button" class="link-btn" data-act="signout">Sair</button>'}</div>
+      <div class="set-row"><div class="card-ic">${I.globe}</div><div class="sm"><b>${s.mode === 'demo' ? 'Modo demonstração' : 'Conta Google'}</b><span>${escapeHtml(s.accountEmail || s.emailLabel || '')}</span></div>${s.mode === 'demo' ? '<button type="button" class="link-btn" data-act="google">Entrar</button>' : '<button type="button" class="link-btn" data-act="signout">Sair</button>'}</div>
       ${s.mode === 'demo' ? `<button type="button" class="set-row" data-act="ask-exit-demo"><div class="card-ic">${I.back}</div><div class="sm"><b>Sair da demonstração</b><span>Apaga os dados de exemplo e volta ao início</span></div>${I.chev}</button>` : ''}
       <div class="set-row"><div class="card-ic">${I.globe}</div><div class="sm"><b>Idioma</b><span>Português da Europa</span></div><span class="val">Português</span></div>
     </section>

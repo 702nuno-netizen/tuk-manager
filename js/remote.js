@@ -12,6 +12,11 @@ const DRIVE = 'https://www.googleapis.com/drive/v3';
 const SHEETS = 'https://sheets.googleapis.com/v4/spreadsheets';
 export const APP_MARK = 'tuk-manager';
 
+export function yearFileName(business, year, role) {
+  const base = `${String(business || '').trim()} · ${year}`;
+  return role === 'backup' ? `${base} (cópia)` : base;
+}
+
 function wait(ms) {
   return new Promise(r => setTimeout(r, ms));
 }
@@ -277,6 +282,60 @@ export function chooseFile(files, { role, year, preferredId, title } = {}) {
 export function decideSetup(files, opts) {
   const file = chooseFile(files, opts);
   return file ? { action: 'reuse', id: file.id, file } : { action: 'create' };
+}
+
+/** Só muda o nome dos ficheiros que já existem. Não cria folha nenhuma. */
+export function renamePlan(files, spec) {
+  const mainName = yearFileName(spec.name, spec.year, 'main');
+  const backupName = yearFileName(spec.name, spec.year, 'backup');
+  let main = chooseFile(files, { role: 'main', year: spec.year, preferredId: spec.mainId });
+  if (spec.mainId && (!main || main.id !== spec.mainId)) main = null;
+  const backup = (main || !spec.mainId) ? chooseFile(files, { role: 'backup', year: spec.year }) : null;
+  const ops = [];
+  if (main && main.name !== mainName && !spec.mainDone) ops.push({ id: main.id, role: 'main', name: mainName });
+  if (backup && backup.name !== backupName) ops.push({ id: backup.id, role: 'backup', name: backupName });
+  return {
+    mainName, backupName,
+    mainId: main ? main.id : '',
+    backupId: backup ? backup.id : '',
+    mainFound: !!main,
+    backupFound: !!backup,
+    ops
+  };
+}
+
+export async function renameYearFiles(token, spec) {
+  const files = await listFiles(token);
+  const plan = renamePlan(files, spec);
+  const out = {
+    main: plan.mainFound || spec.mainDone ? 'ok' : 'missing',
+    backup: plan.backupFound ? 'ok' : 'absent',
+    mainId: plan.mainId,
+    mainName: plan.mainName,
+    backupName: plan.backupName
+  };
+  for (const op of plan.ops) {
+    if (op.role === 'backup' && out.main === 'failed') {
+      out.backup = 'failed';
+      continue;
+    }
+    try {
+      await gfetch(token, `${DRIVE}/files/${op.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ name: op.name })
+      });
+    } catch (e) {
+      if (op.role === 'main') out.main = 'failed';
+      else out.backup = 'failed';
+    }
+  }
+  return out;
+}
+
+export async function accountOf(token) {
+  const data = await gfetch(token, `${DRIVE}/about?fields=user(emailAddress,permissionId)`);
+  const user = (data && data.user) || {};
+  return { email: String(user.emailAddress || ''), id: String(user.permissionId || '') };
 }
 
 function sheetUrl(id) {
@@ -607,25 +666,32 @@ export function fastBatches(model) {
 
 export async function createBook(token, model, preferredId, hooks = {}) {
   const year = model.year;
-  const title = `${model.businessName} · ${year}`;
   const role = hooks.role || 'main';
+  const title = yearFileName(model.businessName, year, 'main');
+  const fileName = yearFileName(model.businessName, year, role);
   const files = await listFiles(token);
   let chosen = chooseFile(files, { role, year, preferredId, title: role === 'main' ? title : undefined });
   if (!chosen) {
-    const created = await driveCreate(token, role === 'backup' ? `${title} (cópia)` : title, role, year);
-    chosen = { id: created.id, name: role === 'backup' ? `${title} (cópia)` : title, appProperties: created.appProperties || {} };
+    if (hooks.mustReuse) {
+      const err = new Error('sem folha');
+      err.status = 401;
+      err.reason = 'Não encontrei a folha nesta conta. Não criei outra.';
+      throw err;
+    }
+    const created = await driveCreate(token, fileName, role, year);
+    chosen = { id: created.id, name: fileName, appProperties: created.appProperties || {} };
     const again = await listFiles(token);
     const winner = chooseFile(again, { role, year, preferredId, title: role === 'main' ? title : undefined });
     if (winner) chosen = winner;
   }
   if (!chosen) throw new Error('sem folha');
-  if (hooks.onFile) await hooks.onFile({ id: chosen.id, name: chosen.name || title, year, url: sheetUrl(chosen.id) });
+  if (hooks.onFile) await hooks.onFile({ id: chosen.id, name: chosen.name || fileName, year, url: sheetUrl(chosen.id) });
   const props = chosen.appProperties || {};
   try {
-    if (role === 'main' && props.ready === '1') return { id: chosen.id, name: chosen.name || title, url: sheetUrl(chosen.id) };
+    if (role === 'main' && props.ready === '1') return { id: chosen.id, name: chosen.name || fileName, url: sheetUrl(chosen.id) };
     if (role === 'main' && props.ready !== '0' && await hasSchema(token, chosen.id)) {
       await stampFile(token, chosen.id, baseProps(role, year, { ready: '1', setupIndex: props.setupIndex || '' }));
-      return { id: chosen.id, name: chosen.name || title, url: sheetUrl(chosen.id) };
+      return { id: chosen.id, name: chosen.name || fileName, url: sheetUrl(chosen.id) };
     }
     const index = Math.max(Number(props.setupIndex) || 0, Number(hooks.localIndex) || 0);
     await stampFile(token, chosen.id, baseProps(role, year, { ready: '0', setupIndex: String(index) }));
@@ -635,7 +701,7 @@ export async function createBook(token, model, preferredId, hooks = {}) {
         await fastFill(token, chosen.id, model, 'build');
         await stampFile(token, chosen.id, baseProps(role, year, { ready: '1', setupIndex: '1' }));
         if (hooks.onDone) await hooks.onDone(1, chosen.id);
-        return { id: chosen.id, name: chosen.name || title, url: sheetUrl(chosen.id) };
+        return { id: chosen.id, name: chosen.name || fileName, url: sheetUrl(chosen.id) };
       } catch (e) {
         if (!shouldStage(e)) throw e;
         console.warn('[folha] pedido único falhou, sigo separador a separador', explainError(e));
@@ -655,10 +721,10 @@ export async function createBook(token, model, preferredId, hooks = {}) {
     });
     await stampFile(token, chosen.id, baseProps(role, year, { ready: '1', setupIndex: String(staged.index) }));
     if (hooks.onDone) await hooks.onDone(staged.index, chosen.id);
-    return { id: chosen.id, name: chosen.name || title, url: sheetUrl(chosen.id) };
+    return { id: chosen.id, name: chosen.name || fileName, url: sheetUrl(chosen.id) };
   } catch (e) {
     e.fileId = chosen.id;
-    e.fileName = chosen.name || title;
+    e.fileName = chosen.name || fileName;
     e.reason = explainError(e);
     console.warn('[folha] falhou', e.stepLabel || '', e.reason, e.body || '');
     throw e;
@@ -1120,7 +1186,7 @@ export async function backupFile(token, file) {
   const copy = await gfetch(token, `${DRIVE}/files/${file.id}/copy`, {
     method: 'POST',
     body: JSON.stringify({
-      name: `${file.name} (cópia)`,
+      name: String(file.name || '').endsWith(' (cópia)') ? file.name : `${file.name} (cópia)`,
       appProperties: baseProps('backup', file.year, { ready: '1' })
     })
   });

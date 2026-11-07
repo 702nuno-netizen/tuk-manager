@@ -1,6 +1,7 @@
 /* Tuk Manager — navegação, gráficos e ações. */
 
 import { plateBad, addDays, parseISO, daysInMonth, iso } from './format.js';
+import { tukOf } from './model.js';
 import { suggestions } from './view.js';
 import { render } from './view.js';
 import {
@@ -408,7 +409,7 @@ function markSteps() {
   if (!steps.length) return;
   const d = state.draft || {};
   steps[0].classList.toggle('on', !!(d.business || '').trim());
-  steps[1].classList.toggle('on', !!(state.emailLabel || '').includes('ligada'));
+  steps[1].classList.toggle('on', !!(state.googleLinked || (state.emailLabel || '').includes('ligada')));
   steps[2].classList.toggle('on', !!(d.driver || '').trim() && !!(d.number || 1));
 }
 
@@ -417,7 +418,7 @@ function submitSetup() {
   const d = state.draft || {};
   if (!(d.business || '').trim()) { note('Falta o nome do negócio.', true); return; }
   if (!(d.driver || '').trim()) { note('Falta o nome do motorista.', true); return; }
-  if (!(state.emailLabel || '').includes('ligada')) {
+  if (!(state.googleLinked || (state.emailLabel || '').includes('ligada'))) {
     note('Entra com Google, ou experimenta a demonstração.', true);
     return;
   }
@@ -443,10 +444,20 @@ function addMoney(type, preset, el) {
   }
 }
 function tukOfDriver() {
-  const id = driverId();
-  const rec = state.model && state.model.days[id] && state.model.days[id][state.date];
-  return rec && rec.tukId;
+  if (!state.model) return '';
+  return tukOf(state.model, driverId(), state.date);
 }
+function nativeTextTarget(el) {
+  return !!(el && el.closest && el.closest('input, textarea, select, [contenteditable="true"], [contenteditable=""]'));
+}
+document.addEventListener('selectstart', (ev) => {
+  if (nativeTextTarget(ev.target)) return;
+  ev.preventDefault();
+});
+document.addEventListener('contextmenu', (ev) => {
+  if (nativeTextTarget(ev.target)) return;
+  ev.preventDefault();
+});
 function firstDaily(tukId) {
   const tuk = (state.model.tuks || []).find(t => t.id === tukId);
   const types = (state.model.types || []).filter(t => t.active && t.freq === 'Diário' && (t.scope !== 'combustão' || (tuk && tuk.fuel === 'combustão')));

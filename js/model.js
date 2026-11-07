@@ -130,6 +130,59 @@ export function dayRec(model, driverId, date) {
   return (model.days[driverId] || {})[date] || null;
 }
 
+function tukUsable(model, tukId, date) {
+  const t = tuk(model, tukId);
+  if (!t) return false;
+  if (t.soldOn && date >= t.soldOn) return false;
+  if (t.status === 'vendido' && !t.soldOn) return false;
+  return true;
+}
+
+function lastRecordBefore(model, driverId, date) {
+  const bag = model.days[driverId] || {};
+  let bestDate = '';
+  let best = null;
+  for (const key of Object.keys(bag)) {
+    if (key >= date) continue;
+    if (key > bestDate) { bestDate = key; best = bag[key]; }
+  }
+  if (!best) return null;
+  return { date: bestDate, tukId: best.tukId || '' };
+}
+
+/** Tuk de cada motorista ativo neste dia: o que está escrito, ou o último que teve, sem criar conflitos. */
+export function dayAssignments(model, date) {
+  const map = {};
+  const taken = new Set();
+  const active = activeDrivers(model);
+  for (const d of active) {
+    const rec = dayRec(model, d.id, date);
+    if (!rec) continue;
+    const id = rec.tukId && tukUsable(model, rec.tukId, date) ? rec.tukId : '';
+    map[d.id] = id;
+    if (id) taken.add(id);
+  }
+  const candidates = [];
+  for (const d of active) {
+    if (Object.prototype.hasOwnProperty.call(map, d.id)) continue;
+    const last = lastRecordBefore(model, d.id, date);
+    if (!last || !last.tukId || !tukUsable(model, last.tukId, date)) continue;
+    candidates.push({ id: d.id, tukId: last.tukId, since: last.date, order: active.indexOf(d) });
+  }
+  candidates.sort((a, b) => (a.since < b.since ? 1 : a.since > b.since ? -1 : a.order - b.order));
+  for (const c of candidates) {
+    if (taken.has(c.tukId)) { map[c.id] = ''; continue; }
+    taken.add(c.tukId);
+    map[c.id] = c.tukId;
+  }
+  for (const d of active) if (!Object.prototype.hasOwnProperty.call(map, d.id)) map[d.id] = '';
+  return map;
+}
+
+export function tukOf(model, driverId, date) {
+  return dayAssignments(model, date)[driverId] || '';
+}
+
 function ensureDay(model, driverId, date) {
   if (!model.days[driverId]) model.days[driverId] = {};
   if (!model.days[driverId][date]) {
@@ -219,6 +272,13 @@ export function sharesOf(model, driverId, date, rec) {
   return { fat, pct: row.pct, driver: driverPart, owner: round2(fat - driverPart), ownerRole: false };
 }
 
+/** Parte da empresa neste dia: o patrão entra por inteiro; o motorista, com o que sobra da %. */
+export function companyOf(model, driverId, date, rec) {
+  const sh = sharesOf(model, driverId, date, rec);
+  if (!(sh.fat > 0)) return 0;
+  return sh.ownerRole ? sh.fat : sh.owner;
+}
+
 export function dayExpense(model, tukId, date) {
   const rec = tukDay(model, tukId, date);
   if (!rec) return { total: 0, byType: {} };
@@ -252,10 +312,10 @@ export function monthlyAmount(model, tukId, year, month, typeId) {
 }
 
 export function whoDrives(model, tukId, date) {
+  const map = dayAssignments(model, date);
   const found = [];
   for (const d of model.drivers) {
-    const rec = dayRec(model, d.id, date);
-    if (rec && rec.tukId === tukId) found.push(d);
+    if (map[d.id] === tukId) found.push(d);
   }
   return found;
 }
@@ -307,15 +367,18 @@ export function tukMonth(model, tukId, year, month) {
   const who = {};
   let serviceDays = 0;
   let fat = 0;
+  let empresa = 0;
   for (const d of model.drivers) {
     for (const { date, rec } of driverDays(model, d.id, year, month)) {
       if (rec.tukId !== tukId) continue;
       const f = faturadoOf(rec);
+      const part = companyOf(model, d.id, date, rec);
       if (f > 0) {
         fat = round2(fat + f);
         serviceDays += 1;
         who[d.id] = (who[d.id] || 0) + 1;
       }
+      if (part) empresa = round2(empresa + part);
     }
   }
   for (const date of Object.keys(bag)) {
@@ -341,7 +404,7 @@ export function tukMonth(model, tukId, year, month) {
     }
   }
   const desp = round2(daily + monthly);
-  return { fat, daily, monthly, desp, lucro: round2(fat - desp), serviceDays, who, dailyByType, dailyDays, monthlyByType };
+  return { fat, empresa, daily, monthly, desp, lucro: round2(empresa - desp), serviceDays, who, dailyByType, dailyDays, monthlyByType };
 }
 
 export function monthView(model, year, month) {
@@ -425,11 +488,12 @@ export function dayCompany(model, date) {
   let fat = 0, desp = 0, company = 0, working = 0;
   const people = [];
   const tukRows = [];
+  const assigned = dayAssignments(model, date);
   for (const d of activeDrivers(model)) {
     const rec = dayRec(model, d.id, date);
     const sh = sharesOf(model, d.id, date, rec);
     const owner = sh.ownerRole;
-    const tukId = rec && rec.tukId;
+    const tukId = assigned[d.id] || '';
     if (sh.fat > 0 || (rec && rec.services && rec.services.length)) working += sh.fat > 0 || (rec && rec.services.length) ? 1 : 0;
     if (rec && rec.services && rec.services.length && sh.fat === 0) working += 0;
     fat = round2(fat + sh.fat);
@@ -508,9 +572,16 @@ function rewriteAutoFrom(model, typeId, tukId, from, amount) {
 }
 
 function requireTuk(model, driverId, date) {
-  const rec = dayRec(model, driverId, date);
-  if (!rec || !rec.tukId) return 'Escolhe primeiro um tuk';
+  if (!tukOf(model, driverId, date)) return 'Escolhe primeiro um tuk';
   return '';
+}
+
+function materializeTuk(model, driverId, date) {
+  const id = tukOf(model, driverId, date);
+  if (!id) return null;
+  const rec = ensureDay(model, driverId, date);
+  if (!rec.tukId) rec.tukId = id;
+  return rec;
 }
 
 export function apply(model, action) {
@@ -538,21 +609,19 @@ function mutate(model, a) {
       if (!t || t.status === 'vendido') return { error: 'Este tuk não está disponível' };
       if (t.soldOn && a.date >= t.soldOn) return { error: 'Este tuk já estava vendido nessa data' };
       let toast = '';
-      for (const other of model.drivers) {
-        if (other.id === d.id) continue;
-        const rec = dayRec(model, other.id, a.date);
-        if (rec && rec.tukId === t.id) {
-          rec.tukId = null;
-          model.notices.unshift({
-            id: 'n' + Date.now().toString(36),
-            date: a.date,
-            fromId: other.id,
-            toId: d.id,
-            tukId: t.id,
-            time: a.time || ''
-          });
-          toast = `${tukTitle(t)} passou para o ${d.name}. O ${other.name} ficou sem tuk.`;
-        }
+      const holders = model.drivers.filter(other => other.id !== d.id && other.active && tukOf(model, other.id, a.date) === t.id);
+      for (const other of holders) {
+        const held = ensureDay(model, other.id, a.date);
+        held.tukId = null;
+        model.notices.unshift({
+          id: 'n' + Date.now().toString(36) + holders.indexOf(other),
+          date: a.date,
+          fromId: other.id,
+          toId: d.id,
+          tukId: t.id,
+          time: a.time || ''
+        });
+        toast = `${tukTitle(t)} passou para o ${d.name}. O ${other.name} ficou sem tuk.`;
       }
       const rec = ensureDay(model, d.id, a.date);
       rec.tukId = t.id;
@@ -563,7 +632,7 @@ function mutate(model, a) {
       if (err) return { error: err };
       const amount = round2(a.amount);
       if (!(amount >= 0)) return { error: 'Valor inválido' };
-      const rec = ensureDay(model, a.driverId, a.date);
+      const rec = materializeTuk(model, a.driverId, a.date);
       if (rec.services.length === 1 && rec.services[0] === 0) rec.services = [];
       rec.services.push(amount);
       return {};
@@ -571,7 +640,7 @@ function mutate(model, a) {
     case 'set-service': {
       const err = requireTuk(model, a.driverId, a.date);
       if (err) return { error: err };
-      const rec = ensureDay(model, a.driverId, a.date);
+      const rec = materializeTuk(model, a.driverId, a.date);
       if (a.amount == null) rec.services.splice(a.index, 1);
       else rec.services[a.index] = round2(a.amount);
       return {};
@@ -579,7 +648,7 @@ function mutate(model, a) {
     case 'zero-day': {
       const err = requireTuk(model, a.driverId, a.date);
       if (err) return { error: err };
-      const rec = ensureDay(model, a.driverId, a.date);
+      const rec = materializeTuk(model, a.driverId, a.date);
       rec.services = [0];
       return { toast: 'Dia a zero' };
     }
@@ -588,7 +657,7 @@ function mutate(model, a) {
       if (!model.tipsEnabled) return { error: 'As gratificações estão desligadas' };
       const err = requireTuk(model, a.driverId, a.date);
       if (err) return { error: err };
-      const rec = ensureDay(model, a.driverId, a.date);
+      const rec = materializeTuk(model, a.driverId, a.date);
       rec.grat.push(round2(a.amount));
       return {};
     }
@@ -602,7 +671,7 @@ function mutate(model, a) {
       if (isOwnerAt(model, a.driverId, a.date)) return { error: 'O patrão não entrega' };
       const err = requireTuk(model, a.driverId, a.date);
       if (err) return { error: err };
-      const rec = ensureDay(model, a.driverId, a.date);
+      const rec = materializeTuk(model, a.driverId, a.date);
       rec.entregue.push(round2(a.amount));
       return {};
     }
@@ -615,7 +684,7 @@ function mutate(model, a) {
     case 'set-note': {
       const err = requireTuk(model, a.driverId, a.date);
       if (err) return { error: err };
-      const rec = ensureDay(model, a.driverId, a.date);
+      const rec = materializeTuk(model, a.driverId, a.date);
       rec.note = String(a.note || '').slice(0, 280);
       return {};
     }

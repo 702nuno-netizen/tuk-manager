@@ -5,9 +5,10 @@ import { explainError, progressText } from './stages.js';
 import { DEMO_TODAY, buildDemo } from './demo.js';
 import { apply, blankYear, ensureRecurring, factoryTypes, isOwnerAt, normalizePct, PCT_START } from './model.js';
 import { buildBook, contextFromModel, driverTitle, tukTitle } from './sheet.js';
-import { TMGoogle } from './google.js';
+import { TMGoogle, accountsDiffer } from './google.js';
 import {
-  addSheetFromBook, appendLog, backupFile, createBook, loadBook, locateJob, pushRoster, readKeys, repaintBook, writeCells
+  accountOf, addSheetFromBook, appendLog, backupFile, createBook, loadBook, locateJob, pushRoster, readKeys,
+  renameYearFiles, repaintBook, writeCells, yearFileName
 } from './remote.js';
 
 const KEY = 'tm.v4';
@@ -19,6 +20,10 @@ export const state = {
   model: null,
   file: null,
   emailLabel: '',
+  googleLinked: false,
+  accountEmail: '',
+  accountId: '',
+  pendingRename: null,
   pending: [],
   rosterSync: false,
   syncError: '',
@@ -54,6 +59,10 @@ function persist() {
       file: state.file,
       pending: state.pending,
       emailLabel: state.emailLabel,
+      googleLinked: !!state.googleLinked,
+      accountEmail: state.accountEmail || '',
+      accountId: state.accountId || '',
+      pendingRename: state.pendingRename || null,
       build: state.build || null,
       paintIndex: state.paintIndex || 0,
       paintDone: !!state.paintDone,
@@ -212,12 +221,49 @@ export function flush() {
   return flight;
 }
 
+async function learnAccount(token) {
+  try { return await accountOf(token); }
+  catch (e) { return null; }
+}
+
+function bindAccount(who) {
+  if (!who || !who.email) return;
+  state.accountEmail = who.email;
+  if (who.id) state.accountId = who.id;
+  state.emailLabel = who.email;
+  state.googleLinked = true;
+  TMGoogle.setHint(who.email);
+}
+
+async function applyRename(token) {
+  const spec = state.pendingRename;
+  if (!spec || !state.file) return;
+  const result = await renameYearFiles(token, spec);
+  if (result.main === 'missing') {
+    state.syncError = 'Não encontrei a folha deste ano para mudar o nome. Não criei outra.';
+    return;
+  }
+  if (result.main === 'failed' || result.backup === 'failed') {
+    state.pendingRename = { ...spec, mainDone: result.main === 'ok' };
+    state.syncError = result.main === 'ok'
+      ? 'A folha já tem o nome novo. A cópia atualiza quando a ligação deixar.'
+      : 'Não consegui mudar o nome na Drive. Os dados ficam neste telemóvel.';
+    return;
+  }
+  state.pendingRename = null;
+  state.file.name = result.mainName || state.file.name;
+  if (result.mainId) state.file.id = result.mainId;
+  state.syncError = '';
+}
+
 async function flushBody() {
   if (state.mode !== 'google' || !state.file) return;
-  if (!state.pending.length && !state.rosterSync) return;
+  if (!state.pending.length && !state.rosterSync && !state.pendingRename) return;
   if (typeof navigator !== 'undefined' && !navigator.onLine) {
     state.offline = true;
-    state.syncError = 'Sem rede. Fica guardado neste telemóvel e segue quando voltares a ter ligação.';
+    state.syncError = state.pendingRename && !state.pending.length
+      ? 'Sem rede. O nome novo fica neste telemóvel e os ficheiros mudam quando voltares a ter ligação.'
+      : 'Sem rede. Fica guardado neste telemóvel e segue quando voltares a ter ligação.';
     poke();
     return;
   }
@@ -242,7 +288,7 @@ async function flushBody() {
     }
     state.file.savedAt = Date.now();
     state.offline = false;
-    state.syncError = '';
+    if (!state.pendingRename) state.syncError = '';
   } catch (e) {
     state.pending = jobs.concat(state.pending);
     state.rosterSync = roster || state.rosterSync;
@@ -253,6 +299,20 @@ async function flushBody() {
       state.syncError = 'Não encontrei a célula na folha. Toca em Repor aspeto da folha.';
     } else {
       state.syncError = 'Não consegui gravar na folha. Os dados ficam neste telemóvel até conseguir.';
+    }
+  }
+  if (state.pendingRename && !state.syncError) {
+    try {
+      const token = await TMGoogle.getToken();
+      await applyRename(token);
+      state.offline = false;
+    } catch (e) {
+      if (e.offline || e.message === 'sem rede') {
+        state.offline = true;
+        state.syncError = 'Sem rede. O nome novo fica neste telemóvel e os ficheiros mudam quando voltares a ter ligação.';
+      } else {
+        state.syncError = 'Não consegui mudar o nome na Drive. Os dados ficam neste telemóvel.';
+      }
     }
   }
   state.syncing = false;
@@ -283,6 +343,15 @@ export function dispatch(action) {
   const saved = new Set(['set-objective', 'set-objectives', 'set-business', 'set-tips', 'update-type', 'add-type', 'update-driver', 'add-driver', 'update-tuk', 'add-tuk', 'set-fixed', 'set-prize']);
   if (saved.has(action.type)) note('Modificado com sucesso', false);
   else if (res.toast) note(res.toast, false);
+  if (state.mode === 'google' && state.file && before.businessName !== res.model.businessName) {
+    state.pendingRename = {
+      year: res.model.year,
+      name: res.model.businessName,
+      mainId: state.file.id || '',
+      mainDone: false
+    };
+    state.file = { ...state.file, name: yearFileName(res.model.businessName, res.model.year, 'main') };
+  }
   rememberJobs(before, res.model);
   persist();
   poke();
@@ -315,20 +384,72 @@ export async function startDemo() {
   poke();
 }
 
+async function refreshFromSheet(token) {
+  if (!state.file || !state.model) return;
+  const fresh = await loadBook(token, state.file.id, state.model.year);
+  normalizePct(fresh);
+  if (!fresh.objectives.length || fresh.objectives.every(o => !o.amount)) {
+    fresh.objectives = Array.from({ length: 12 }, (_, i) => ({ month: i + 1, amount: 3000 }));
+  }
+  fresh.today = civilToday();
+  state.model = fresh;
+  state.date = fresh.today;
+  state.month = Number(String(fresh.today).slice(5, 7)) || state.month;
+  state.rosterSync = true;
+  state.syncError = '';
+}
+
 export async function connectGoogle(select) {
   if (state.busy) return;
   state.busy = true;
   state.busyLabel = 'A ligar à conta…';
   poke();
   try {
-    await TMGoogle.signIn(!!select);
-    state.emailLabel = 'Conta Google ligada';
-    note('Conta ligada. A app só vê as folhas que ela cria.', false);
+    const token = await TMGoogle.signIn(!!select);
+    const who = await learnAccount(token);
+    if (state.onboarded && state.mode === 'google' && accountsDiffer(state.accountId, who && who.id)) {
+      TMGoogle.forgetToken();
+      note(state.accountEmail ? `Esta folha está na conta ${state.accountEmail}.` : 'Esta folha está noutra conta.', true);
+    } else {
+      if (!state.onboarded && select) {
+        state.file = null;
+        state.build = null;
+        state.pending = [];
+        state.pendingRename = null;
+      }
+      if (state.onboarded && state.mode === 'google' && state.file) {
+        try {
+          await refreshFromSheet(token);
+          if (who && who.email) bindAccount(who);
+          else state.googleLinked = true;
+          const after = flush();
+          if (state.copyPending) Promise.resolve(after).finally(() => scheduleBackup(token));
+          note('Conta ligada.', false);
+        } catch (e) {
+          TMGoogle.forgetToken();
+          state.syncError = 'Não consegui ler a folha. O que está neste telemóvel continua aqui.';
+          note(state.syncError, true);
+        }
+      } else {
+        if (who && who.email) bindAccount(who);
+        else if (select) {
+          state.accountEmail = '';
+          state.accountId = '';
+          state.emailLabel = 'Conta Google ligada';
+          TMGoogle.setHint('');
+        } else if (!state.accountEmail) {
+          state.emailLabel = 'Conta Google ligada';
+        }
+        state.googleLinked = true;
+        note('Conta ligada. A app só vê as folhas que ela cria.', false);
+      }
+    }
   } catch (e) {
     note(e.message === 'timeout' ? 'A janela da Google fechou sem concluir.' : 'Não foi possível ligar à conta Google.', true);
   }
   state.busy = false;
   state.busyLabel = '';
+  persist();
   poke();
 }
 
@@ -365,6 +486,15 @@ export async function createFromSetup(form) {
   poke();
   try {
     const token = await TMGoogle.getToken();
+    const who = await learnAccount(token);
+    if (accountsDiffer(state.accountId, who && who.id)) {
+      TMGoogle.forgetToken();
+      const err = new Error('conta');
+      err.reason = state.accountEmail ? `Esta folha está na conta ${state.accountEmail}.` : 'Esta folha está noutra conta.';
+      throw err;
+    }
+    if (who && who.email) bindAccount(who);
+    state.googleLinked = true;
     const created = await createBook(token, state.build.model, state.build.fileId, progressHooks());
     const file = { ...created, year };
     state.file = file;
@@ -380,7 +510,8 @@ export async function createFromSetup(form) {
     state.date = state.model.today;
     state.month = Number(state.model.today.slice(5, 7));
     state.route = { name: 'hoje' };
-    state.emailLabel = 'Conta Google ligada';
+    if (!state.accountEmail) state.emailLabel = 'Conta Google ligada';
+    state.googleLinked = true;
     state.setupError = '';
     rememberJobs(before, state.model);
     state.copyToken = token;
@@ -569,7 +700,7 @@ export function exitDemo() {
   state.toastHtml = '';
   state.toastOn = false;
   state.route = { name: 'inicio' };
-  state.emailLabel = '';
+  state.emailLabel = state.accountEmail || '';
   state.date = '';
   persist();
   poke();
@@ -583,15 +714,28 @@ export function signOut() {
   state.file = null;
   state.route = { name: 'inicio' };
   state.emailLabel = '';
+  state.googleLinked = false;
+  state.accountEmail = '';
+  state.accountId = '';
+  state.pendingRename = null;
   state.pending = [];
   try { localStorage.removeItem(KEY); } catch (e) { /* ignore */ }
   poke();
+}
+
+function restoreAccount(saved) {
+  state.googleLinked = !!(saved && (saved.googleLinked || (saved.emailLabel && String(saved.emailLabel).indexOf('ligada') >= 0)));
+  state.accountEmail = (saved && saved.accountEmail) || '';
+  state.accountId = (saved && saved.accountId) || '';
+  state.pendingRename = (saved && saved.pendingRename) || null;
+  if (state.accountEmail) TMGoogle.setHint(state.accountEmail);
 }
 
 export async function boot() {
   TMGoogle.setClientId((window.TM_CONFIG && window.TM_CONFIG.clientId) || '');
   let saved = null;
   try { saved = JSON.parse(localStorage.getItem(KEY) || 'null'); } catch (e) { saved = null; }
+  restoreAccount(saved);
   if (saved && saved.copyPending) state.copyPending = true;
   if (saved && saved.build && !saved.build.done && saved.build.model && saved.build.fileId) {
     state.build = saved.build;
@@ -605,14 +749,18 @@ export async function boot() {
     poke();
     try {
       const token = await TMGoogle.silent();
-      if (!token) {
+      const who = token ? await learnAccount(token) : null;
+      if (!token || accountsDiffer(saved.accountId, who && who.id)) {
+        if (token && who && accountsDiffer(saved.accountId, who.id)) TMGoogle.forgetToken();
         const err = new Error('sessao');
         err.status = 401;
         throw err;
       }
       const hooks = progressHooks();
+      hooks.mustReuse = true;
       hooks.localIndex = saved.build.index || 0;
       const created = await createBook(token, saved.build.model, saved.build.fileId, hooks);
+      if (who && who.email) bindAccount(who);
       state.file = { ...created, year: saved.build.year };
       state.build = { fileId: created.id, year: saved.build.year, index: state.setupTotal || saved.build.index || 0, done: true };
       state.model = await loadBook(token, created.id, saved.build.year);
@@ -623,7 +771,8 @@ export async function boot() {
       state.date = state.model.today;
       state.month = Number(String(state.model.today).slice(5, 7)) || 1;
       state.route = { name: 'hoje' };
-      state.emailLabel = 'Conta Google ligada';
+      if (!state.accountEmail) state.emailLabel = 'Conta Google ligada';
+      state.googleLinked = true;
       state.setupError = '';
       state.copyToken = token;
     } catch (e) {
@@ -650,17 +799,15 @@ export async function boot() {
       } else {
         try {
           const token = await TMGoogle.silent();
-          if (token && state.file) {
-            const fresh = await loadBook(token, state.file.id, state.model.year);
-            normalizePct(fresh);
-            if (!fresh.objectives.length || fresh.objectives.every(o => !o.amount)) {
-              fresh.objectives = Array.from({ length: 12 }, (_, i) => ({ month: i + 1, amount: 3000 }));
-            }
-            fresh.today = civilToday();
-            state.model = fresh;
-            state.date = fresh.today;
-            state.month = Number(String(fresh.today).slice(5, 7)) || state.month;
-            state.rosterSync = true;
+          const who = token ? await learnAccount(token) : null;
+          if (token && who && accountsDiffer(state.accountId, who.id)) {
+            TMGoogle.forgetToken();
+            state.syncError = state.accountEmail
+              ? `Entra outra vez com a conta ${state.accountEmail} para sincronizar a folha.`
+              : 'Entra outra vez para sincronizar a folha.';
+          } else if (token && state.file) {
+            await refreshFromSheet(token);
+            if (who && who.email) bindAccount(who);
             const after = flush();
             if (saved.copyPending) Promise.resolve(after).finally(() => scheduleBackup(token));
           } else {

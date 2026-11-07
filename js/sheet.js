@@ -310,7 +310,7 @@ function tukSheet(plan, t, template) {
   ws.put(4, 4, 'Despesas', { bold: true, color: 'FFFFFF', bg: RED, align: 'center', border: true, size: 9 });
   ws.put(5, 4, `=SUMIFS($${despLetter}$9:$${despLetter}$600,$A$9:$A$600,"T|*")`, { bold: true, size: 12, bg: REDL, align: 'center', nf: EURN, border: true });
   ws.put(4, 5, 'Lucro', { bold: true, color: 'FFFFFF', bg: GREEN, align: 'center', border: true, size: 9 });
-  ws.put(5, 5, '=B5-D5', { bold: true, size: 12, bg: GREENL, align: 'center', nf: EURN, border: true });
+  ws.put(5, 5, `=SUMIFS($${lucroLetter}$9:$${lucroLetter}$600,$A$9:$A$600,"T|*")`, { bold: true, size: 12, bg: GREENL, align: 'center', nf: EURN, border: true });
   ws.rowH[4] = 30;
   ws.rowH[5] = 24;
   for (let m = 1; m <= 12; m++) {
@@ -348,7 +348,8 @@ function tukSheet(plan, t, template) {
       for (let c = 6; c <= fimC; c++) ws.put(r, c, '', { bg: INP, border: true, nf: EUR, input: true });
       ws.put(r, auxC, `=IF(LEFT(D${r},1)="⚠",1,0)`, { color: GREY, size: 8 });
       ws.put(r, despC, `=IF(COUNT(${fLetter}${r}:${fimLetter}${r})=0,"",SUM(${fLetter}${r}:${fimLetter}${r}))`, { nf: EUR, bg: REDL, border: true });
-      ws.put(r, lucroC, `=IF(AND(E${r}="",${despLetter}${r}=""),"",N(E${r})-N(${despLetter}${r}))`, { nf: EURN, bg: GREENL, border: true });
+      const parte = `IFERROR(SUMIFS(${CN}!$J$2:$J$4000,${CN}!$A$2:$A$4000,$A${r},${CN}!$E$2:$E$4000,$A$6),0)`;
+      ws.put(r, lucroC, `=IF(AND(E${r}="",${despLetter}${r}=""),"",${parte}-N(${despLetter}${r}))`, { nf: EURN, bg: GREENL, border: true });
       ws.put(r, notaC, '', { bg: INP, border: true, input: true });
     }
     const a = r0 + 2;
@@ -400,7 +401,7 @@ function tukSheet(plan, t, template) {
       ws.put(rt, c, `=SUM(${L}${a}:${L}${b})`, { bold: true, bg: TOT, nf: EURN, border: true });
     }
     ws.put(rt, despC, `=SUM(${despLetter}${a}:${despLetter}${b})+SUM(${despLetter}${m1}:${despLetter}${m2})`, { bold: true, bg: TOT, nf: EURN, border: true });
-    ws.put(rt, lucroC, `=E${rt}-${despLetter}${rt}`, { bold: true, bg: TOT, nf: EURN, border: true });
+    ws.put(rt, lucroC, `=SUM(${lucroLetter}${a}:${lucroLetter}${b})+SUM(${lucroLetter}${m1}:${lucroLetter}${m2})`, { bold: true, bg: TOT, nf: EURN, border: true });
     ws.put(rk, 1, 'K|' + ym, { color: GREY, size: 8 });
     ws.put(rk, 2, `="Dias com serviço: "&${diasLetter}${rk}&"   ·   Média diária: "&TEXT(IFERROR(E${rt}/${diasLetter}${rk},0),"#,##0.00")&" €"`, { bg: LIGHT, size: 9 });
     ws.merge(rk, 2, rk, notaC);
@@ -737,6 +738,7 @@ function ajuda() {
     '• Sem tuk não se registam serviços nem gastos.',
     '• A % é sempre a parte do motorista. O patrão conta para o objetivo e não recebe prémio.',
     '• Faturado = soma dos serviços. Saldo = entregue − parte do patrão.',
+    '• Lucro do tuk = parte da empresa no faturado − despesas desse tuk. O patrão entra por inteiro. O motorista entra só com o que fica para a empresa: 100 € a 40% deixam 60 € antes das despesas. O faturado total continua à parte. As despesas saem todas à empresa, uma só vez.',
     'Não fazer',
     '• Não apagues separadores, a coluna A nem a linha 1: são as chaves da app. Para desativar, usa a app.',
     '• Repor aspeto da folha refaz colunas, larguras, fórmulas, cores e proteções sem mexer nos valores escritos. Se um separador foi apagado, a app pergunta antes de o criar outra vez.'
@@ -758,6 +760,7 @@ function estrutura(plan) {
     ['motorista', 'ocultas', 'motorista', 'A, F, M', 'Gratificações só no patrão'],
     ['motorista', 'ocultas', 'patrão', 'A, G, H, I, J, K, M', 'F também se as gratificações estiverem desligadas'],
     ['tuk', 'chaves', 'linha 1', '', 'data, motorista, faturado, type-<id>, fim, aux, desp, lucro, nota, dias'],
+    ['tuk', 'lucro', 'parte da empresa', 'lucro', 'Faturado bruto na coluna E. Lucro = parte da empresa − despesas. Patrão por inteiro; motorista com (1 − %).'],
     ['tuk', 'entrada', 'fim', 'antes de fim', 'tipo diário novo: coluna nova imediatamente antes da coluna oculta fim'],
     ['tuk', 'entrada', 'mensal', 'D', 'valor na linha M|mês|tipo; linhas M|mês|- são a reserva'],
     ['tuk', 'ocultas', 'elétrico', 'type-g1', 'combustível oculto'],
@@ -806,6 +809,14 @@ function resumos(plan) {
     tuks.put(r, 1, `=IF(${QT}!$A$${k}="","",${QT}!$B$${k}&IF(${QT}!$E$${k}<>""," · "&${QT}!$E$${k},""))`, { border: true, bold: true });
     tuks.put(r, 2, `=IF(A${r}="","",${QT}!$F$${k})`, { border: true });
     tuks.put(r, 3, `=IF(A${r}="","",${QT}!$H$${k})`, { border: true });
+    const idCol = colLetter(24);
+    const fatCol = colLetter(26);
+    const despCol = colLetter(26 + plan.daily.length + 2);
+    const lucCol = colLetter(26 + plan.daily.length + 3);
+    const tukSum = (col) => `=IF(A${r}="","",SUMIFS(${CN}!$${col}$2:$${col}$5000,${CN}!$${idCol}$2:$${idCol}$5000,${QT}!$A$${k}))`;
+    tuks.put(r, 4, tukSum(fatCol), { border: true, nf: EURN });
+    tuks.put(r, 5, tukSum(despCol), { border: true, nf: EURN });
+    tuks.put(r, 6, tukSum(lucCol), { border: true, nf: EURN });
     tuks.put(r, 7, plan.tuks[i] ? `=HYPERLINK("#gid={{gid:${plan.tuks[i].id}}}","abrir →")` : '', { color: '1155CC' });
   }
   tuks.protectRange('A1:Z200');
